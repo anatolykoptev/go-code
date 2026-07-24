@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/anatolykoptev/vaelor/internal/slugparse"
+	"golang.org/x/sync/singleflight"
 )
 
 // dirPerm is the permission mode for created workspace directories.
@@ -121,16 +122,52 @@ func CloneRepo(ctx context.Context, opts CloneOpts) (*CloneResult, error) {
 		return &CloneResult{LocalPath: localPath, Ref: opts.Ref}, nil
 	}
 
-	if err := os.MkdirAll(opts.DestDir, dirPerm); err != nil {
-		return nil, fmt.Errorf("create dest dir: %w", err)
-	}
-
 	cloneURL := buildCloneURL(opts, slug)
-	if err := runClone(ctx, cloneURL, opts.Ref, localPath); err != nil {
-		return nil, fmt.Errorf("git clone %s: %w", repoName, err)
+	// Single-flight per localPath on the cold-clone path: the first caller
+	// clones; concurrent callers for the SAME slug-deterministic localPath
+	// await its result instead of each launching their own git clone into the
+	// same directory. Pre-fix, two code_search calls on a never-cloned
+	// owner/repo both entered runClone and raced into the same localPath
+	// (partial trees, double fetch, one call's ReleaseCloneRef→CleanupCloneDir
+	// wiping a dir another was mid-write on — #676/#677). Distinct localPaths
+	// are distinct single-flight keys, so unrelated repos still clone in
+	// parallel — no false serialization.
+	//
+	// Modeled on golang.org/x/sync/singleflight.Group.DoChan + the in-house
+	// internal/goanalysis/cached_loader.go usage (which itself models on
+	// canonical singleflight, the same primitive Sourcegraph's gitserver
+	// lock.go prevents concurrent same-repo clones with). The shared clone
+	// runs under a DECOUPLED context (context.Background()+cloneOpTimeout, not
+	// any caller's ctx) so a caller giving up early returns its own ctx.Err()
+	// without killing the in-flight clone for the other waiters — the
+	// leader-ctx-poisoning failure goanalysis PR #294 fixed.
+	//
+	// Cleanup interaction with cloneRefs: runCloneFn completes the full tree
+	// BEFORE any waiter receives the CloneResult (singleflight shares the
+	// result only after the fn returns). Each waiter then acquires its own
+	// cloneRefs refcount in workspace.RemoteSource.Root (after CloneRepo
+	// returns), so the dir is removed only at refcount=0 — a waiter never
+	// observes a half-written or wiped tree.
+	ch := cloneGroup.DoChan(localPath, func() (any, error) {
+		cloneCtx, cancel := context.WithTimeout(context.Background(), cloneOpTimeout)
+		defer cancel()
+		if err := os.MkdirAll(opts.DestDir, dirPerm); err != nil {
+			return nil, fmt.Errorf("create dest dir: %w", err)
+		}
+		if err := runCloneFn(cloneCtx, cloneURL, opts.Ref, localPath); err != nil {
+			return nil, fmt.Errorf("git clone %s: %w", repoName, err)
+		}
+		return &CloneResult{LocalPath: localPath, Ref: opts.Ref}, nil
+	})
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.(*CloneResult), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-
-	return &CloneResult{LocalPath: localPath, Ref: opts.Ref}, nil
 }
 
 // atomicReclone clones into a sibling tmp directory, then atomically swaps it
@@ -170,6 +207,25 @@ func buildCloneURL(opts CloneOpts, slug string) string {
 	}
 	return fmt.Sprintf("https://github.com/%s.git", slug)
 }
+
+// cloneOpTimeout bounds a single cold git clone performed under the per-
+// localPath single-flight. It is applied to a DECOUPLED context
+// (context.Background(), not any caller's ctx) so a caller giving up early
+// cannot cancel the in-flight clone out from under other waiters — see
+// CloneRepo. Matches internal/goanalysis's defaultTimeout (10m), the
+// in-house convention for a shared, caller-decoupled expensive op.
+const cloneOpTimeout = 10 * time.Minute
+
+// cloneGroup coalesces concurrent cold-clone calls for the same localPath
+// into a single in-flight git clone — see CloneRepo.
+var cloneGroup singleflight.Group
+
+// runCloneFn is the indirection through which the cold-clone path calls the
+// real git clone. It exists purely for testability: white-box tests in this
+// package swap it for a counting/barrier-controlled fake to deterministically
+// exercise the per-localPath single-flight without shelling out to git — the
+// same seam shape as internal/goanalysis/cached_loader.go's loadPackagesFn.
+var runCloneFn = runClone
 
 // runClone executes the git clone command into dest.
 func runClone(ctx context.Context, cloneURL, ref, dest string) error {
