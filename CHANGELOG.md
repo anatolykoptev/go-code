@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.59.2](https://github.com/anatolykoptev/vaelor/compare/v1.59.1...v1.59.2) (2026-07-24)
+
+
+### Fixed
+
+* **ingest:** plain-rename fallback for first-clone / RENAME_EXCHANGE-unsupported (Closes [#676](https://github.com/anatolykoptev/vaelor/issues/676)) ([#677](https://github.com/anatolykoptev/vaelor/issues/677)) ([a74d820](https://github.com/anatolykoptev/vaelor/commit/a74d82063a373532975a25b9838ff3596d0675fc))
+
 ## [1.59.1](https://github.com/anatolykoptev/vaelor/compare/v1.59.0...v1.59.1) (2026-07-24)
 
 
