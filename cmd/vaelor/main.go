@@ -168,7 +168,7 @@ func runMCPServe(cfg Config) {
 		SchemaCache: mcp.NewSchemaCache(),
 	})
 
-	deps, pipeline := registerTools(ctx, server, cfg, reg)
+	deps, pipeline, graphStore := registerTools(ctx, server, cfg, reg)
 	slog.Info("tools registered", slog.Int("count", argnorm.Default().Count()))
 
 	// Eager GOCACHE pre-warm for AUTO_INDEX_DIRS Go repos. Runs in a
@@ -196,7 +196,7 @@ func runMCPServe(cfg Config) {
 	// server. Reuses the signal.NotifyContext ctx for cancellation so
 	// SIGINT/SIGTERM triggers graceful watcher shutdown.
 	if cfg.WatchEnabled {
-		go startFileWatcher(ctx, cfg, pipeline, reg)
+		go startFileWatcher(ctx, cfg, pipeline, reg, graphStore)
 	}
 
 	// Webhook handler registered via mcpserver.Config.Routes below so it shares

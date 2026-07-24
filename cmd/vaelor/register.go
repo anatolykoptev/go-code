@@ -91,7 +91,7 @@ func llmCooldownDuration() time.Duration {
 // Each tool has its own file: tool_<name>.go
 // Returns the analyze.Deps for use by other components (e.g., webhook handler)
 // and the embeddings Pipeline (nil when EMBED_URL is unset) for the file watcher.
-func registerTools(ctx context.Context, server *mcp.Server, cfg Config, reg *kitmetrics.Registry) (analyze.Deps, *embeddings.Pipeline) {
+func registerTools(ctx context.Context, server *mcp.Server, cfg Config, reg *kitmetrics.Registry) (analyze.Deps, *embeddings.Pipeline, *codegraph.Store) {
 	parseCacheSize := env.Int("PARSE_CACHE_SIZE", cache.DefaultParseCacheSize)
 	llmCacheSize := env.Int("LLM_CACHE_SIZE", cache.DefaultLLMCacheSize)
 	llmCacheTTLMin := env.Int("LLM_CACHE_TTL_MIN", defaultLLMCacheTTL)
@@ -348,7 +348,7 @@ func registerTools(ctx context.Context, server *mcp.Server, cfg Config, reg *kit
 	startCodeGraphAgeGaugeWarm(ctx, graphStore, autoIndexDirs(cfg))
 	startZeroEmbeddingsCounterWarm(semDeps.Store)
 
-	return deps, semDeps.Pipeline
+	return deps, semDeps.Pipeline, graphStore
 }
 
 // gaugeTickerInterval is the publication cadence for both background gauge

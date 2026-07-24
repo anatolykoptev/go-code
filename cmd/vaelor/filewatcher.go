@@ -39,13 +39,18 @@ type repoEntry struct {
 // ingest ignore patterns, and dispatches debounced save events to a
 // single-worker goroutine that calls Pipeline.IndexFile (ADR-4, ADR-6).
 //
+// In addition to the embedding refresh, each event triggers a debounced +
+// single-flighted background AGE-graph refresh via graphRefresher (#642), so
+// the graph (call edges, PageRank, communities) stays consistent with the
+// embeddings after a watched edit instead of silently going stale.
+//
 // Graceful degradation (ADR-16): on any watcher failure the function logs a
 // warning, sets gocode_watcher_healthy=0, and returns without crashing the
 // caller. The MCP server continues to serve with boot-time AutoIndex only.
 //
 // The watcher discovers repos once at startup; new repos are not watched until
 // restart (ADR-17). This limitation is logged at startup.
-func startFileWatcher(ctx context.Context, cfg Config, pipeline *embeddings.Pipeline, reg *kitmetrics.Registry) {
+func startFileWatcher(ctx context.Context, cfg Config, pipeline *embeddings.Pipeline, reg *kitmetrics.Registry, graphStore *codegraph.Store) {
 	if pipeline == nil {
 		slog.Warn("file watcher: pipeline is nil — watcher disabled")
 		return
@@ -98,6 +103,19 @@ func startFileWatcher(ctx context.Context, cfg Config, pipeline *embeddings.Pipe
 		repoMap[root] = repoEntry{key: codegraph.GraphNameFor(root), root: root}
 	}
 
+	// Background AGE-graph refresh coalescer (#642). Constructed once; each
+	// event triggers Trigger(repoKey, root) which debounces + single-flights
+	// the rebuild so the graph stays fresh without stampeding the box.
+	refreshCfg := codegraph.IndexConfig{
+		TTLLocal:            cfg.GraphTTLLocal,
+		TTLRemote:           cfg.GraphTTLRemote,
+		BatchSize:           cfg.GraphBatchSize,
+		EnableSurpriseIndex: cfg.CodegraphSurpriseIndex,
+		FlowsMax:            cfg.FlowsMax,
+		FlowsDFSDepth:       cfg.FlowsDFSDepth,
+	}
+	refresher := newGraphRefresher(graphStore, refreshCfg)
+
 	// Internal event channel: forwarder → single IndexFile worker.
 	ch := make(chan watcher.Event, watchEventBufferSize)
 
@@ -128,7 +146,7 @@ func startFileWatcher(ctx context.Context, cfg Config, pipeline *embeddings.Pipe
 	// Single-worker goroutine: serializes IndexFile calls (Concurrency=1, ADR-6).
 	go func() {
 		for ev := range ch {
-			processWatchEvent(ctx, ev, repoMap, pipeline, reg)
+			processWatchEvent(ctx, ev, repoMap, pipeline, reg, refresher)
 		}
 		slog.Info("file watcher: worker stopped")
 		reg.Gauge("watcher_healthy").Set(0)
@@ -168,8 +186,10 @@ func buildWatcherOptions(debounce time.Duration) []watcher.Option {
 }
 
 // processWatchEvent maps a watcher.Event to (repoKey, root, relPath) and calls
-// Pipeline.IndexFile. Errors are logged but do not crash the worker.
-func processWatchEvent(ctx context.Context, ev watcher.Event, repoMap map[string]repoEntry, pipeline *embeddings.Pipeline, reg *kitmetrics.Registry) {
+// Pipeline.IndexFile, then triggers a debounced background AGE-graph refresh
+// (#642) so the graph stays consistent with the embeddings. Errors are logged
+// but do not crash the worker.
+func processWatchEvent(ctx context.Context, ev watcher.Event, repoMap map[string]repoEntry, pipeline *embeddings.Pipeline, reg *kitmetrics.Registry, refresher *graphRefresher) {
 	// Determine which repo the path belongs to (prefix match on repo root).
 	var root, repoKey, relPath string
 	for r, info := range repoMap {
@@ -198,4 +218,11 @@ func processWatchEvent(ctx context.Context, ev watcher.Event, repoMap map[string
 		slog.Warn("file watcher: IndexFile error",
 			slog.String("repo", repoKey), slog.String("file", relPath), slog.Any("error", err))
 	}
+
+	// Trigger a debounced background AGE-graph refresh (#642). The graph reads
+	// source files directly (independent of embeddings), so it must refresh on
+	// any source-file write the watcher saw — even when IndexFile short-
+	// circuited (test file, oversized) or errored. Trigger is non-blocking and
+	// coalesces bursts, so this never stalls the worker or stamps the box.
+	refresher.Trigger(repoKey, root)
 }
