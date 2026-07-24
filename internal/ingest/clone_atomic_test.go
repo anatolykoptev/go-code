@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAtomicReclone_FinalPathNeverAbsent asserts the core safety property:
@@ -192,6 +193,176 @@ func TestAtomicReclone_OldContentPreservedOnCloneFailure(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(finalDest, "README.md")); statErr != nil {
 		t.Fatalf("README.md lost after failed atomicReclone: %v", statErr)
+	}
+}
+
+// TestAtomicDirectorySwap_FirstClone_FinalDestAbsent reproduces issue #676:
+// on the first clone (or a concurrent-removal race) finalDest does NOT exist,
+// so renameat2(RENAME_EXCHANGE) has nothing to exchange and returns ENOENT.
+// The swap must fall back to a plain atomic rename instead of failing the
+// whole search.
+//
+// Runs on all platforms: on Linux it exercises the plain-rename fallback;
+// on non-Linux the two-step fallback already skips the absent finalDest.
+func TestAtomicDirectorySwap_FirstClone_FinalDestAbsent(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin")
+	dest := filepath.Join(tmp, "workspace")
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, origin)
+
+	opts := CloneOpts{
+		Slug:     "test/cold",
+		DestDir:  dest,
+		CloneURL: "file://" + origin,
+		Ref:      "main",
+	}
+
+	// Clone into a tmp sibling exactly as atomicReclone does, but leave
+	// finalDest ABSENT — the first-clone / concurrent-removal condition.
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tmpDest := filepath.Join(dest, "test_cold.tmp.first")
+	if err := runClone(context.Background(), opts.CloneURL, opts.Ref, tmpDest); err != nil {
+		t.Fatalf("runClone into tmp: %v", err)
+	}
+	finalDest := filepath.Join(dest, "test_cold")
+	if _, err := os.Stat(finalDest); err == nil {
+		t.Fatalf("precondition: finalDest %q should not exist", finalDest)
+	}
+
+	if err := atomicDirectorySwap(tmpDest, finalDest); err != nil {
+		t.Fatalf("atomicDirectorySwap with absent finalDest: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(finalDest, "README.md")); err != nil {
+		t.Fatalf("README.md missing after first-clone swap: %v", err)
+	}
+	entries, _ := os.ReadDir(dest)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("tmp directory leaked after first-clone swap: %s", e.Name())
+		}
+	}
+}
+
+// TestPlainRename_FinalDestAbsent verifies the first-clone fallback primitive:
+// with finalDest absent, plainRename atomically moves tmpDest into place and
+// leaves no tmp directory behind.
+func TestPlainRename_FinalDestAbsent(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	finalDest := filepath.Join(tmp, "final")
+	tmpDest := filepath.Join(tmp, "tmp")
+	if err := os.MkdirAll(tmpDest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDest, "F"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := plainRename(tmpDest, finalDest); err != nil {
+		t.Fatalf("plainRename: %v", err)
+	}
+	if _, err := os.Stat(tmpDest); err == nil {
+		t.Errorf("tmpDest not moved away by plainRename")
+	}
+	if b, err := os.ReadFile(filepath.Join(finalDest, "F")); err != nil || string(b) != "x" {
+		t.Fatalf("finalDest missing content: %v %q", err, b)
+	}
+}
+
+// TestPlainRename_FailureCleansTmp verifies that when plainRename's rename
+// fails (e.g. EXDEV across filesystems), tmpDest is cleaned up — no leak.
+func TestPlainRename_FailureCleansTmp(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	// finalDest on a non-existent parent → rename fails (ENOENT on parent).
+	finalDest := filepath.Join(tmp, "missing-subdir", "final")
+	tmpDest := filepath.Join(tmp, "tmp")
+	if err := os.MkdirAll(tmpDest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDest, "F"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := plainRename(tmpDest, finalDest); err == nil {
+		t.Fatal("expected plainRename to fail when parent dir is missing")
+	}
+	if _, err := os.Stat(tmpDest); err == nil {
+		t.Errorf("tmpDest leaked after failed plainRename")
+	}
+}
+
+// TestTwoStepSwap_FinalDestExists verifies the ENOSYS/EINVAL fallback path on
+// Linux (and the primary non-Linux path): when finalDest exists and is
+// non-empty, twoStepSwap renames old→stale, tmp→finalDest, and removes stale.
+func TestTwoStepSwap_FinalDestExists(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	finalDest := filepath.Join(tmp, "final")
+	tmpDest := filepath.Join(tmp, "tmp")
+	if err := os.MkdirAll(finalDest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(finalDest, "OLD"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(tmpDest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDest, "NEW"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := twoStepSwap(tmpDest, finalDest); err != nil {
+		t.Fatalf("twoStepSwap: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(finalDest, "NEW")); err != nil || string(b) != "new" {
+		t.Fatalf("finalDest missing new content: %v %q", err, b)
+	}
+	// stale removed async — poll briefly.
+	for i := 0; i < 100; i++ {
+		leftover := ""
+		entries, _ := os.ReadDir(tmp)
+		for _, e := range entries {
+			if strings.Contains(e.Name(), ".stale.") {
+				leftover = e.Name()
+			}
+		}
+		if leftover == "" {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	entries, _ := os.ReadDir(tmp)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".stale.") {
+			t.Errorf("stale directory leaked: %s", e.Name())
+		}
+	}
+}
+
+// TestTwoStepSwap_FinalDestAbsent verifies twoStepSwap also handles the
+// first-clone case (finalDest absent) by skipping the first rename.
+func TestTwoStepSwap_FinalDestAbsent(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	finalDest := filepath.Join(tmp, "final")
+	tmpDest := filepath.Join(tmp, "tmp")
+	if err := os.MkdirAll(tmpDest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDest, "F"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := twoStepSwap(tmpDest, finalDest); err != nil {
+		t.Fatalf("twoStepSwap absent finalDest: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(finalDest, "F")); err != nil || string(b) != "x" {
+		t.Fatalf("finalDest missing content: %v %q", err, b)
 	}
 }
 
