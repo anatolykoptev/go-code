@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.59.4](https://github.com/anatolykoptev/go-code/compare/v1.59.3...v1.59.4) (2026-07-24)
+
+
+### Fixed
+
+* **index:** debounced background AGE-graph refresh on watched edits (Closes [#642](https://github.com/anatolykoptev/go-code/issues/642)) ([#689](https://github.com/anatolykoptev/go-code/issues/689)) ([64e7719](https://github.com/anatolykoptev/go-code/commit/64e771951b7c26744d7efb3c7e35732cd377c7ed))
+
 ## [1.59.3](https://github.com/anatolykoptev/vaelor/compare/v1.59.2...v1.59.3) (2026-07-24)
 
 
