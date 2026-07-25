@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.59.6](https://github.com/anatolykoptev/vaelor/compare/v1.59.5...v1.59.6) (2026-07-25)
+
+
+### Documentation
+
+* **mcp:** describe every param of the 10 highest-arity tools (refs [#684](https://github.com/anatolykoptev/vaelor/issues/684)) ([#695](https://github.com/anatolykoptev/vaelor/issues/695)) ([cef70b1](https://github.com/anatolykoptev/vaelor/commit/cef70b1ed3f59df692798fbddcda0b760691f8e5))
+
 ## [1.59.5](https://github.com/anatolykoptev/vaelor/compare/v1.59.4...v1.59.5) (2026-07-25)
 
 
