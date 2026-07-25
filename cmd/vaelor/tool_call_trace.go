@@ -35,6 +35,7 @@ type xmlTrace struct {
 	ProductionCallerCount int            `xml:"production_caller_count,attr,omitempty"`
 	Condensed             string         `xml:"condensed,attr,omitempty"`
 	Elided                int            `xml:"elided,attr,omitempty"`
+	Warming               string         `xml:"warming,attr,omitempty"`
 	Nodes                 []xmlTraceNode `xml:"node"`
 	Narrative             *xmlCDATA      `xml:"narrative,omitempty"`
 }
@@ -253,6 +254,7 @@ type callTraceOutput struct {
 	CallTree              []callgraph.CallChainNode `json:"call_tree"`
 	Stats                 traceStats                `json:"stats"`
 	Tier                  string                    `json:"tier,omitempty"`
+	Warming               bool                      `json:"warming,omitempty"`
 	Narrative             string                    `json:"narrative,omitempty"`
 	ProductionCallerCount int                       `json:"production_caller_count,omitempty"`
 }
@@ -410,6 +412,7 @@ func handleCallTrace(ctx context.Context, input CallTraceInput, deps analyze.Dep
 					ResolvedRatio:         output.Stats.ResolvedRatio,
 					Tier:                  output.Tier,
 					ProductionCallerCount: output.ProductionCallerCount,
+					Warming:               warmingAttr(output.Warming),
 					Nodes:                 convertTraceNodes(output.CallTree),
 				},
 			}
@@ -437,6 +440,7 @@ func handleCallTrace(ctx context.Context, input CallTraceInput, deps analyze.Dep
 					ProductionCallerCount: output.ProductionCallerCount,
 					Condensed:             "depth-1",
 					Elided:                elided,
+					Warming:               warmingAttr(output.Warming),
 					Nodes:                 convertTraceNodes(prunedTree),
 				},
 			}
@@ -494,6 +498,16 @@ func productionCallerKey(n callgraph.CallChainNode) string {
 	return n.Symbol.Name + "\x00" + n.Symbol.File + "\x00" + strconv.Itoa(int(n.Symbol.StartLine)) + "\x00" + n.Symbol.Receiver
 }
 
+// warmingAttr converts the Warming bool to an XML attribute value for
+// call_trace's response. Returns "type-aware enrichment is warming, retry for the enhanced tier"
+// when true, "" when false (omitted from XML via omitempty).
+func warmingAttr(warming bool) string {
+	if warming {
+		return "type-aware enrichment is warming, retry for the enhanced tier"
+	}
+	return ""
+}
+
 func buildCallTraceOutput(ctx context.Context, symbol, direction string, result *callgraph.TraceResult, deps analyze.Deps, compact bool) callTraceOutput {
 	total := result.Resolved + result.Unresolved
 	var ratio float64
@@ -512,7 +526,8 @@ func buildCallTraceOutput(ctx context.Context, symbol, direction string, result 
 			Unresolved:    result.Unresolved,
 			ResolvedRatio: ratio,
 		},
-		Tier: result.Tier,
+		Tier:    result.Tier,
+		Warming: result.Warming,
 	}
 
 	if direction == "callers" {

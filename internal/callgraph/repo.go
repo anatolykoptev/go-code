@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"os/exec"
 	"sync"
 	"time"
 
@@ -126,6 +125,7 @@ func TraceRepo(ctx context.Context, input TraceRepoInput) (*TraceResult, error) 
 
 	result := Trace(ctx, g, input.Symbol, input.Opts)
 	result.Tier = g.Tier
+	result.Warming = g.Warming
 
 	return &result, nil
 }
@@ -156,17 +156,33 @@ func EnrichWithTypedResolution(ctx context.Context, root string, base *CallGraph
 			cg = MergeCallGraphs(cg, typedCG)
 			cg.Tier = "enhanced"
 			cg.Backend = BackendGoTypes
-		}
 
-		// Go IMPLEMENTS enrichment: tree-sitter cannot see structural interface
-		// satisfaction (no `implements` keyword), so cg.TypeRels from parsing
-		// carries only embedding (INHERITS) edges for Go. Compute (type→interface)
-		// satisfaction via go/types and append it as RelImplements relationships.
-		// Both call_trace (via BuildFromRepo) and code_graph (via
-		// buildAGECallGraph) call this seam, so both get IMPLEMENTS edges now.
-		// Non-fatal and bounded: on go.mod-absent / load-failure / timeout this
-		// returns nil. See issue #467.
-		cg.TypeRels = append(cg.TypeRels, ExtractGoImplements(ctx, root)...)
+			// Go IMPLEMENTS enrichment: tree-sitter cannot see structural interface
+			// satisfaction (no `implements` keyword), so cg.TypeRels from parsing
+			// carries only embedding (INHERITS) edges for Go. Compute (type→interface)
+			// satisfaction via go/types and append it as RelImplements relationships.
+			// Both call_trace (via BuildFromRepo) and code_graph (via
+			// buildAGECallGraph) call this seam, so both get IMPLEMENTS edges now.
+			// Non-fatal and bounded: on go.mod-absent / load-failure / timeout this
+			// returns nil. See issue #467.
+			//
+			// Only run when CALLS resolution succeeded — both share the same
+			// CachedLoadPackages, so if CALLS got a warm cache hit, IMPLEMENTS
+			// will too (fast). On a cold cache where CALLS failed, IMPLEMENTS
+			// would join the same slow singleflight load and block for up to 30s
+			// (issue #735) — skip it and let the background warm handle it.
+			cg.TypeRels = append(cg.TypeRels, ExtractGoImplements(ctx, root)...)
+		} else {
+			// Cold cache: go/types CALLS enrichment failed (tryGoTypesResolution
+			// returned nil). The background warm (warmGoTypesCache in
+			// BuildFromRepo) is running and will upgrade the cached entry; a
+			// retry will return the enhanced tier. Mark the graph so callers can
+			// surface a "type-aware enrichment is warming, retry for the
+			// enhanced tier" note. Do NOT call ExtractGoImplements here — it
+			// would block on the same slow packages.Load that already failed,
+			// burning the request's remaining deadline (issue #735).
+			cg.Warming = true
+		}
 	}
 
 	// Attempt SCIP resolution for non-Go languages (or when go/types failed).
@@ -245,9 +261,19 @@ func buildPrewarmEnv() []string {
 
 // warmGoTypesCache runs go/types analysis in background to warm GOCACHE.
 // When complete, it upgrades the cached CallGraph from basic to enhanced tier.
+//
+// The pre-warm `go build` step was removed (issue #735 Part 2): it ran
+// `go build -mod=vendor ./...` with CGO_ENABLED=0, which fails on every cgo
+// repo (build constraints exclude all Go files for cgo-requiring packages).
+// The runtime image lacks gcc/musl-dev so CGO_ENABLED=1 is not viable either.
+// GOCACHE is now persistent (ops-side fix), so packages.Load in this
+// background warm handles warming without the pre-build. A failing warm is
+// counted by gocode_callgraph_background_warm_total{outcome="failed} so
+// operators can alert on repos that never reach the enhanced tier.
 func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 	_, alreadyWarming := goTypesWarmingSet.LoadOrStore(root, true)
 	if alreadyWarming {
+		recordBackgroundWarm("skipped")
 		return
 	}
 	defer goTypesWarmingSet.Delete(root)
@@ -256,18 +282,6 @@ func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-
-	// Pre-warm GOCACHE with go build -- fills object cache without NeedTypesInfo overhead.
-	// After this, packages.Load completes in <10s instead of 3+ minutes.
-	slog.Info("go/types: pre-warming GOCACHE via go build", "root", root)
-	buildCmd := exec.CommandContext(ctx, "go", "build", "-mod=vendor", "./...")
-	buildCmd.Dir = root
-	buildCmd.Env = buildPrewarmEnv()
-	if berr := buildCmd.Run(); berr != nil {
-		slog.Warn("go/types: go build pre-warm failed (non-fatal)", "err", berr)
-		// Continue anyway -- packages.Load may still succeed from partial cache.
-	}
-	slog.Info("go/types: go build pre-warm done, starting packages.Load", "root", root)
 
 	// tryGoTypesResolution now routes through goanalysis.CachedLoadPackages.
 	// The synchronous 10s probe in EnrichWithTypedResolution that triggered
@@ -278,7 +292,8 @@ func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 	goanalysis.InvalidateCachedLoad(root)
 	typedCG := tryGoTypesResolution(ctx, root, symbols)
 	if typedCG == nil {
-		slog.Warn("go/types: background warm failed", "root", root)
+		slog.Error("go/types: background warm failed — cache stays at basic tier", "root", root)
+		recordBackgroundWarm("failed")
 		return
 	}
 
@@ -290,4 +305,5 @@ func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 		cgCache.set(cacheKey, enhanced, root)
 	}
 	slog.Info("go/types: GOCACHE warmed, cache upgraded to enhanced", "root", root)
+	recordBackgroundWarm("completed")
 }

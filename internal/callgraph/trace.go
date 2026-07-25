@@ -58,6 +58,7 @@ type TraceResult struct {
 	Resolved   int             `json:"resolved"`
 	Unresolved int             `json:"unresolved"`
 	Tier       string          `json:"tier,omitempty"`
+	Warming    bool            `json:"warming,omitempty"`
 }
 
 // Trace walks the call graph from the named symbol, building a tree of call chains.

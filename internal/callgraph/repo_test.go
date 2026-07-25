@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anatolykoptev/vaelor/internal/goanalysis"
 	"github.com/anatolykoptev/vaelor/internal/ingest"
+	"github.com/anatolykoptev/vaelor/internal/parser"
 )
 
 func TestTraceRepo_Integration(t *testing.T) {
@@ -416,3 +418,162 @@ def main():
 // TestAGEGraphMissesHomonymousPkgVarMethodCall (fixture (a)). See
 // internal/goanalysis/resolver_hardred_test.go's TestResolve_VarFuncBindingAlias
 // for the resolver-level proof that goanalysis.Resolve itself emits the edge.
+
+// TestEnrichWithTypedResolution_ColdCache_SetsWarmingAndSkipsImplements is the
+// RED test for issue #735 Part 1: on a cold go/types cache (tryGoTypesResolution
+// returns nil), EnrichWithTypedResolution must set Warming=true and must NOT
+// call ExtractGoImplements (which blocks on the same slow packages.Load that
+// already failed). Before the fix, Warming was always false and ExtractGoImplements
+// was called unconditionally, blocking the request path for up to 30s on a cold
+// repo — converting a usable tree-sitter answer into a timeout error.
+//
+// The repo has a go.mod with a broken replace directive so packages.Load fails
+// fast (no network, no GOCACHE warm-up needed) — tryGoTypesResolution returns nil
+// without hanging. The test then asserts the cold-path contract: Warming=true and
+// zero IMPLEMENTS edges (ExtractGoImplements was skipped).
+func TestEnrichWithTypedResolution_ColdCache_SetsWarmingAndSkipsImplements(t *testing.T) {
+	dir := t.TempDir()
+
+	// go.mod with a replace to a nonexistent local path. Combined with the
+	// syntax-broken main.go below, packages.Load cannot produce any package
+	// with TypesInfo — LoadPackages returns an error, and
+	// tryGoTypesResolution returns nil (the cold-path trigger).
+	gomod := "module example.com/cold\n\ngo 1.21\n\nrequire example.com/missing v1.0.0\n\nreplace example.com/missing => ./does-not-exist\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// main.go with a syntax error — packages.Load cannot type-check it,
+	// TypesInfo is nil, the package is excluded by LoadPackages' filter,
+	// and with zero typed packages LoadPackages returns an error.
+	src := `package main
+
+func main() {
+	this is not valid go syntax
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Evict any stale cache entry from a prior test against the same root path.
+	// t.TempDir() gives a unique path, but the singleflight + negative-cache
+	// in goanalysis is keyed by root — clear it to be safe.
+	goanalysis.InvalidateCachedLoad(dir)
+
+	base := &CallGraph{
+		Edges:   []CallEdge{{CalleeName: "useMissing"}},
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic",
+		Backend: BackendTreeSitter,
+	}
+
+	cg := EnrichWithTypedResolution(context.Background(), dir, base, base.Symbols, nil)
+
+	if !cg.Warming {
+		t.Error("expected Warming=true on cold cache (tryGoTypesResolution returned nil)")
+	}
+	if cg.Tier != "basic" {
+		t.Errorf("expected Tier=basic on cold path, got %q", cg.Tier)
+	}
+	// ExtractGoImplements must NOT have been called on the cold path — it would
+	// block on the same slow packages.Load that already failed. Verify zero
+	// IMPLEMENTS edges were added.
+	for _, rel := range cg.TypeRels {
+		if rel.Kind == parser.RelImplements {
+			t.Errorf("expected no IMPLEMENTS edges on cold path (ExtractGoImplements should be skipped), found %+v", rel)
+		}
+	}
+}
+
+// TestEnrichWithTypedResolution_WarmCache_NoWarmingFlag verifies that when
+// go/types resolution succeeds (warm cache or fast load), Warming is NOT set
+// and IMPLEMENTS edges are computed normally. This is the warm-path contract:
+// the warming note must only appear on the degraded path.
+func TestEnrichWithTypedResolution_WarmCache_NoWarmingFlag(t *testing.T) {
+	dir := t.TempDir()
+
+	gomod := "module example.com/warm\n\ngo 1.22\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	src := `package main
+
+type Greeter interface {
+	Greet() string
+}
+
+type Hello struct{}
+
+func (h Hello) Greet() string { return "hello" }
+
+func useGreeter(g Greeter) string {
+	return g.Greet()
+}
+
+func main() {
+	useGreeter(Hello{})
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+
+	base := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic",
+		Backend: BackendTreeSitter,
+	}
+
+	cg := EnrichWithTypedResolution(context.Background(), dir, base, base.Symbols, nil)
+
+	if cg.Warming {
+		t.Error("expected Warming=false on warm cache (tryGoTypesResolution succeeded)")
+	}
+}
+
+// TestWarmGoTypesCache_NoPrewarmBuild verifies that warmGoTypesCache does NOT
+// shell out to `go build` as a pre-warm step (issue #735 Part 2). The pre-warm
+// was dropped because it could never succeed on cgo repos under CGO_ENABLED=0
+// (build constraints exclude all Go files) and the runtime image lacks gcc for
+// CGO_ENABLED=1. GOCACHE is now persistent (ops-side fix), so packages.Load in
+// the background warm handles warming without the pre-build.
+//
+// The test captures slog output and asserts the "pre-warming GOCACHE via go
+// build" log does NOT appear — proving the pre-warm step was removed.
+func TestWarmGoTypesCache_NoPrewarmBuild(t *testing.T) {
+	dir := t.TempDir()
+
+	gomod := "module example.com/nowarm\n\ngo 1.21\n\nrequire example.com/missing v1.0.0\n\nreplace example.com/missing => ./does-not-exist\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+	InvalidateBuildCache()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	prev := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(prev)
+
+	// warmGoTypesCache is normally called as a goroutine; call it synchronously
+	// to inspect its behaviour. It will fail (broken deps) but must NOT attempt
+	// a `go build` pre-warm.
+	warmGoTypesCache(dir, nil, cgCacheKey(TraceRepoInput{Root: dir}))
+
+	logOutput := buf.String()
+	if strings.Contains(logOutput, "pre-warming GOCACHE via go build") {
+		t.Errorf("expected NO pre-warm go build log, but found it in output: %s", logOutput)
+	}
+	if strings.Contains(logOutput, "go build pre-warm") {
+		t.Errorf("expected NO go build pre-warm log, but found it in output: %s", logOutput)
+	}
+}

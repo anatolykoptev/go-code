@@ -133,6 +133,37 @@ func recordEagerWarm(outcome string) {
 	eagerWarmTotal.WithLabelValues(outcome).Inc()
 }
 
+// gocode_callgraph_background_warm_total counts on-demand background go/types
+// warm outcomes (warmGoTypesCache in repo.go). This is the warm path that
+// upgrades a cold tree-sitter-only CallGraph to the enhanced tier after the
+// request has already returned the degraded result.
+//
+// Outcomes (cardinality 3, no repo label to keep cardinality bounded):
+//   - completed — packages.Load succeeded, cache upgraded to enhanced
+//   - failed    — packages.Load failed (cold GOCACHE, unbuildable deps,
+//     timeout); the cache stays at basic tier
+//   - skipped   — already warming (duplicate goroutine suppressed by
+//     goTypesWarmingSet)
+//
+// Operators should alert on a sustained non-zero `failed` rate: it means the
+// background warm never succeeds for a repo, so every cold request returns
+// tree-sitter-only and the enhanced tier is never reached. Before this
+// counter, the only signal was a WARN log swallowed as "non-fatal" — the
+// pre-warm `go build` step that failed on every cgo repo (issue #735) was
+// invisible to operators.
+var backgroundWarmTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "gocode_callgraph_background_warm_total",
+		Help: "On-demand background go/types warm outcomes, labelled by outcome (completed, failed, skipped).",
+	},
+	[]string{"outcome"},
+)
+
+// recordBackgroundWarm bumps the background-warm counter for one outcome.
+func recordBackgroundWarm(outcome string) {
+	backgroundWarmTotal.WithLabelValues(outcome).Inc()
+}
+
 // gocode_parser_unresolved_alias_total counts import paths in Astro frontmatter
 // that contain a path alias (~/…, @/…, or any non-relative prefix) and could
 // not be resolved to a repo-relative file path after all resolution attempts.
