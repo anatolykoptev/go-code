@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.59.5](https://github.com/anatolykoptev/vaelor/compare/v1.59.4...v1.59.5) (2026-07-25)
+
+
+### Fixed
+
+* **config:** make silently-disabled capabilities loud and observable (Closes [#600](https://github.com/anatolykoptev/vaelor/issues/600), [#601](https://github.com/anatolykoptev/vaelor/issues/601), [#602](https://github.com/anatolykoptev/vaelor/issues/602), [#603](https://github.com/anatolykoptev/vaelor/issues/603)) ([#692](https://github.com/anatolykoptev/vaelor/issues/692)) ([d90e4e9](https://github.com/anatolykoptev/vaelor/commit/d90e4e93fcd8a9a80c8bf48336f6d9ecdcc59d2c))
+
 ## [1.59.4](https://github.com/anatolykoptev/go-code/compare/v1.59.3...v1.59.4) (2026-07-24)
 
 
