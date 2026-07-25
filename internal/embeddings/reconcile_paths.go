@@ -23,16 +23,23 @@ import (
 // rename-induced contamination before a human stumbles on it.
 //
 // Cardinality: 1 label (repo) — bounded by indexed repo count (~100).
+//
+// IMPORTANT: this gauge is ONLY set on a MEASURED pass (root exists, source_path
+// non-empty). Skip branches (root_missing, source_path_empty) do NOT touch it —
+// a false 0.0 would hide the problem. The companion gocode_index_stale_path_unmeasured
+// gauge distinguishes "could not measure" from "measured, clean" (#708 round 2
+// finding 1).
 var stalePathRatioGauge = promauto.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Name: "gocode_index_stale_path_ratio",
-		Help: "Share of a repo's indexed embedding rows whose file_path does not resolve under the repo root (0.0 = clean). Updated at index time.",
+		Help: "Share of a repo's indexed embedding rows whose file_path does not resolve under the repo root (0.0 = clean). Updated at index time ONLY when the ratio was actually measured; see gocode_index_stale_path_unmeasured for skip branches.",
 	},
 	[]string{"repo"},
 )
 
 // SetStalePathRatioGauge sets the gocode_index_stale_path_ratio gauge for one
-// repo. Called by ReconcileRepoPaths after each reconciliation pass.
+// repo. Called by ReconcileRepoPaths after each MEASURED reconciliation pass.
+// Skip branches must NOT call this — they set stalePathUnmeasuredGauge instead.
 func SetStalePathRatioGauge(repoKey string, ratio float64) {
 	stalePathRatioGauge.WithLabelValues(repoKey).Set(ratio)
 }
@@ -43,6 +50,43 @@ func SetStalePathRatioGauge(repoKey string, ratio float64) {
 func WarmStalePathRatioGauge(repoKeys []string) {
 	for _, repo := range repoKeys {
 		stalePathRatioGauge.WithLabelValues(repo).Set(0)
+	}
+}
+
+// gocode_index_stale_path_unmeasured is a companion to
+// gocode_index_stale_path_ratio. It is 1 when the stale-path ratio could NOT
+// be measured (root_missing or source_path_empty skip branch) and 0 when it
+// was measured. The reason label carries the skip reason ("root_missing",
+// "source_path_empty", or "none" for a measured pass).
+//
+// Without this gauge, "could not measure" is indistinguishable from "measured,
+// clean" — the ratio gauge reads 0.0 in both cases (warmed to 0 at boot, never
+// overwritten on a skip). 54 of 131 live keys (16.2% of rows) report a false
+// 0.0; one is KNOWN contaminated (#708 round 2 finding 1).
+//
+// Cardinality: 2 labels (repo, reason) — reason is bounded to 3 values, repo
+// bounded by indexed repo count (~100).
+var stalePathUnmeasuredGauge = promauto.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "gocode_index_stale_path_unmeasured",
+		Help: "1 when the stale-path ratio could not be measured (root missing or empty source_path); 0 when measured. The reason label carries the skip reason.",
+	},
+	[]string{"repo", "reason"},
+)
+
+// SetStalePathUnmeasuredGauge sets the gocode_index_stale_path_unmeasured
+// gauge for one repo. reason is "root_missing", "source_path_empty", or
+// "none" (measured pass). value is 1 on a skip, 0 on a measured pass.
+func SetStalePathUnmeasuredGauge(repoKey, reason string, value float64) {
+	stalePathUnmeasuredGauge.WithLabelValues(repoKey, reason).Set(value)
+}
+
+// WarmStalePathUnmeasuredGauge pre-touches the gauge to 0 for every known repo
+// at boot (reason="none") so the series exists and is alertable — a gauge that
+// only appears when non-zero cannot be alerted on with absent().
+func WarmStalePathUnmeasuredGauge(repoKeys []string) {
+	for _, repo := range repoKeys {
+		stalePathUnmeasuredGauge.WithLabelValues(repo, "none").Set(0)
 	}
 }
 
@@ -163,9 +207,15 @@ func (s *Store) ListRepoKeysWithSourcePath(ctx context.Context) ([]RepoKeySource
 // it.
 func CheckStalePaths(root string, counts []PathCount) (stale []PathCount, totalRows int64, ok bool) {
 	// ROOT-MISSING GUARD — the most important line in this file.
-	// If the root itself does not exist, we cannot trust any per-file stat
-	// (every file would appear "stale" under a missing root). Delete nothing.
-	if _, err := os.Stat(root); err != nil {
+	// If the root itself does not exist OR is not a directory, we cannot trust
+	// any per-file stat (every file would appear "stale" under a missing or
+	// file-replaced root). Delete nothing. Requiring IsDir catches the case
+	// where a root path is replaced by a regular file (e.g. a checkout path
+	// reused as a file) — os.Stat succeeds on a file, but every file_path
+	// joined under it would be "stale", causing a whole-key wipe (#708 round 2
+	// finding 4).
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
 		return nil, 0, false
 	}
 	for _, pc := range counts {
@@ -210,7 +260,9 @@ func (s *Store) ReconcileRepoPaths(ctx context.Context, repoKey, sourcePath stri
 		res.SkipReason = "source_path_empty"
 		slog.Info("reconcile_paths: skipped (empty source_path)",
 			slog.String("repo", repoKey))
-		SetStalePathRatioGauge(repoKey, 0)
+		// Do NOT set the ratio gauge — a false 0.0 would hide the problem.
+		// Mark unmeasured so the companion gauge distinguishes this from clean.
+		SetStalePathUnmeasuredGauge(repoKey, "source_path_empty", 1)
 		return res, nil
 	}
 
@@ -232,8 +284,9 @@ func (s *Store) ReconcileRepoPaths(ctx context.Context, repoKey, sourcePath stri
 			slog.String("repo", repoKey),
 			slog.String("source_path", sourcePath),
 			slog.Int64("total_rows", res.TotalRows))
-		// Do NOT touch the gauge — we could not measure divergence, and a
-		// false 0.0 would hide the problem. Leave the previous value.
+		// Do NOT set the ratio gauge — a false 0.0 would hide the problem.
+		// Mark unmeasured so the companion gauge distinguishes this from clean.
+		SetStalePathUnmeasuredGauge(repoKey, "root_missing", 1)
 		return res, nil
 	}
 
@@ -246,6 +299,8 @@ func (s *Store) ReconcileRepoPaths(ctx context.Context, repoKey, sourcePath stri
 		ratio = float64(res.StaleRows) / float64(res.TotalRows)
 	}
 	SetStalePathRatioGauge(repoKey, ratio)
+	// Measured pass — clear the unmeasured flag.
+	SetStalePathUnmeasuredGauge(repoKey, "none", 0)
 
 	// Loud log when the miss rate exceeds the threshold — a 14% divergence
 	// went unnoticed for weeks (#708); this WARN makes it visible.

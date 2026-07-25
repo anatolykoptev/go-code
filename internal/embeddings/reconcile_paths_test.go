@@ -81,6 +81,33 @@ func TestCheckStalePaths_EmptyCountsNoOp(t *testing.T) {
 	assert.Equal(t, int64(0), staleRows)
 }
 
+// TestCheckStalePaths_RootIsFileNotDirGuardIsTheDataLossGuard verifies that
+// when the root path exists but is a REGULAR FILE (not a directory),
+// CheckStalePaths returns ok=false — a root replaced by a file must not cause
+// a whole-key wipe (#708 round 2 finding 4).
+//
+// os.Stat succeeds on a regular file; without the IsDir() check, every
+// file_path joined under a file root would be "stale" (filepath.Join produces
+// a nonsensical path), causing the reconciler to delete every row.
+//
+// Falsifiable: revert the `!info.IsDir()` condition (check only os.Stat err)
+// and ok becomes true with all paths stale ⇒ this test goes RED.
+func TestCheckStalePaths_RootIsFileNotDirGuardIsTheDataLossGuard(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "not_a_dir")
+	require.NoError(t, os.WriteFile(root, []byte("i am a file, not a directory"), 0o644))
+
+	counts := []PathCount{
+		{Path: "a.go", Count: 10},
+		{Path: "b.go", Count: 20},
+	}
+
+	stale, staleRows, ok := CheckStalePaths(root, counts)
+	assert.False(t, ok, "root is a file (not a dir) ⇒ ok MUST be false (data-loss guard)")
+	assert.Nil(t, stale, "root is a file ⇒ no stale paths returned")
+	assert.Equal(t, int64(0), staleRows, "root is a file ⇒ zero stale rows")
+}
+
 // TestCheckStalePaths_DirectoryExistsCountsAsPresent verifies that a
 // file_path that resolves to a directory (not a regular file) is still
 // considered present — os.Stat succeeds on directories. This covers the edge
@@ -281,4 +308,168 @@ func TestReconcileRepoPaths_GaugeSetCorrectly(t *testing.T) {
 	assert.Equal(t, 0.0, ratio, "gauge = 0.0 for a clean repo")
 
 	_ = res
+}
+
+// -- Finding 1: unmeasured companion gauge --
+
+// TestReconcileRepoPaths_SkipEmptySourcePathSetsUnmeasuredNotRatio verifies
+// that the source_path_empty skip branch sets the unmeasured gauge to 1
+// (reason="source_path_empty") and does NOT overwrite the ratio gauge with
+// 0.0 — the sentinel ratio must survive the skip (#708 round 2 finding 1).
+//
+// Falsifiable: if the skip branch calls SetStalePathRatioGauge(repo, 0), the
+// sentinel ratio (0.5) is overwritten to 0.0 ⇒ assert.Equal(0.5, ...) fails.
+// If the skip branch does NOT call SetStalePathUnmeasuredGauge, the unmeasured
+// gauge stays at 0 (warmed) ⇒ assert.Equal(1.0, ...) fails.
+//
+// DB-gated: needs a store to call ReconcileRepoPaths (the empty-source_path
+// branch returns before any DB query, but the method is on *Store).
+func TestReconcileRepoPaths_SkipEmptySourcePathSetsUnmeasuredNotRatio(t *testing.T) {
+	s := testStore(t)
+	const repo = "test/reconcile-unmeasured-empty"
+	cleanRepo(t, s, repo)
+	ctx := context.Background()
+
+	// Set a sentinel ratio so we can detect if the skip overwrites it.
+	SetStalePathRatioGauge(repo, 0.5)
+	SetStalePathUnmeasuredGauge(repo, "none", 0)
+
+	res, err := s.ReconcileRepoPaths(ctx, repo, "", false)
+	require.NoError(t, err)
+	assert.True(t, res.Skipped)
+	assert.Equal(t, "source_path_empty", res.SkipReason)
+
+	// Unmeasured gauge must be 1 with reason="source_path_empty".
+	unmeasured := gaugeValue(t, stalePathUnmeasuredGauge.WithLabelValues(repo, "source_path_empty"))
+	assert.Equal(t, 1.0, unmeasured, "unmeasured gauge must be 1 on source_path_empty skip")
+
+	// Ratio gauge must NOT have been overwritten to 0 by the skip.
+	ratio := gaugeValue(t, stalePathRatioGauge.WithLabelValues(repo))
+	assert.Equal(t, 0.5, ratio, "ratio gauge must retain its previous value (0.5), not be reset to 0.0 by the skip")
+}
+
+// TestReconcileRepoPaths_SkipRootMissingSetsUnmeasuredNotRatio verifies
+// that the root_missing skip branch sets the unmeasured gauge to 1
+// (reason="root_missing") and does NOT overwrite the ratio gauge with 0.0.
+//
+// Falsifiable: if the skip branch calls SetStalePathRatioGauge(repo, 0), the
+// sentinel ratio (0.5) is overwritten to 0.0 ⇒ assert.Equal(0.5, ...) fails.
+//
+// DB-gated: needs a store (ListFilePathCounts runs before CheckStalePaths).
+func TestReconcileRepoPaths_SkipRootMissingSetsUnmeasuredNotRatio(t *testing.T) {
+	s := testStore(t)
+	const repo = "test/reconcile-unmeasured-root-missing"
+	cleanRepo(t, s, repo)
+	ctx := context.Background()
+
+	insertSymbols(t, s, repo, "a.go", []string{"A"})
+
+	root := t.TempDir()
+	require.NoError(t, os.RemoveAll(root), "root does not exist")
+
+	// Set a sentinel ratio so we can detect if the skip overwrites it.
+	SetStalePathRatioGauge(repo, 0.5)
+	SetStalePathUnmeasuredGauge(repo, "none", 0)
+
+	res, err := s.ReconcileRepoPaths(ctx, repo, root, false)
+	require.NoError(t, err)
+	assert.True(t, res.Skipped)
+	assert.Equal(t, "root_missing", res.SkipReason)
+
+	// Unmeasured gauge must be 1 with reason="root_missing".
+	unmeasured := gaugeValue(t, stalePathUnmeasuredGauge.WithLabelValues(repo, "root_missing"))
+	assert.Equal(t, 1.0, unmeasured, "unmeasured gauge must be 1 on root_missing skip")
+
+	// Ratio gauge must NOT have been overwritten to 0 by the skip.
+	ratio := gaugeValue(t, stalePathRatioGauge.WithLabelValues(repo))
+	assert.Equal(t, 0.5, ratio, "ratio gauge must retain its previous value (0.5), not be reset to 0.0 by the skip")
+}
+
+// TestReconcileRepoPaths_MeasuredPassClearsUnmeasured verifies that a
+// measured pass sets the unmeasured gauge to 0 (reason="none").
+//
+// Falsifiable: if the measured pass does NOT call SetStalePathUnmeasuredGauge,
+// the gauge stays at 1 (set by a prior skip) ⇒ assert.Equal(0.0, ...) fails.
+//
+// DB-gated: needs a store for a full measured reconciliation.
+func TestReconcileRepoPaths_MeasuredPassClearsUnmeasured(t *testing.T) {
+	s := testStore(t)
+	const repo = "test/reconcile-unmeasured-measured"
+	cleanRepo(t, s, repo)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "keep.go"), []byte("x"), 0o644))
+
+	insertSymbols(t, s, repo, "keep.go", []string{"A"})
+
+	// Simulate a prior skip: unmeasured=1.
+	SetStalePathUnmeasuredGauge(repo, "root_missing", 1)
+
+	_, err := s.ReconcileRepoPaths(ctx, repo, root, false)
+	require.NoError(t, err)
+
+	// Measured pass must clear unmeasured to 0 with reason="none".
+	unmeasured := gaugeValue(t, stalePathUnmeasuredGauge.WithLabelValues(repo, "none"))
+	assert.Equal(t, 0.0, unmeasured, "measured pass must set unmeasured gauge to 0 (reason=none)")
+}
+
+// -- Finding 3: delete is scoped to its own repo_key --
+
+// TestReconcileRepoPaths_DeleteScopedToRepoKey verifies that reconciling
+// repo_key A deletes ONLY A's rows — even when repo_key B shares the SAME
+// stale relative file_path. Without the repo_key scoping in DeleteRowsByFilePaths
+// (WHERE repo_key = $1 AND file_path = ANY($2)), reconciling A would delete
+// B's rows too — a cross-repo data-loss bug.
+//
+// 2679 file_paths are shared across more than one repo_key live (40.3% of
+// rows). Relative paths like main.go / go.mod / internal/config/config.go
+// recur across the fleet.
+//
+// Falsifiable (anti-vacuous): mutate DeleteRowsByFilePaths to replace
+// `repo_key = $1` with `($1::text IS NOT NULL)` (deleting across EVERY repo).
+// B's rows vanish ⇒ assert.Len(bRows, 2) fails.
+//
+// DB-gated: needs a real store with two repo_keys sharing the same file_path.
+func TestReconcileRepoPaths_DeleteScopedToRepoKey(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const repoA = "test/reconcile-cross-repo-A"
+	const repoB = "test/reconcile-cross-repo-B"
+	cleanRepo(t, s, repoA)
+	cleanRepo(t, s, repoB)
+
+	// Both repos share the SAME stale relative path "gone.go".
+	insertSymbols(t, s, repoA, "gone.go", []string{"A1", "A2"})
+	insertSymbols(t, s, repoB, "gone.go", []string{"B1", "B2"})
+
+	// Root for A: "gone.go" does NOT exist (stale).
+	rootA := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(rootA, "keep.go"), []byte("x"), 0o644))
+	insertSymbols(t, s, repoA, "keep.go", []string{"A3"})
+
+	// Record source_paths so ReconcileRepoPaths can find the roots.
+	require.NoError(t, s.SetRepoStateWithPath(ctx, repoA, "deadbeef", "test-model", rootA))
+
+	// Reconcile ONLY repo A.
+	res, err := s.ReconcileRepoPaths(ctx, repoA, rootA, false)
+	require.NoError(t, err)
+	assert.False(t, res.Skipped)
+	assert.Equal(t, int64(2), res.Deleted, "A's 2 gone.go rows must be deleted")
+
+	// A's gone.go rows must be gone.
+	aGoneRows, err := s.GetSymbolsForFile(ctx, repoA, "gone.go")
+	require.NoError(t, err)
+	assert.Len(t, aGoneRows, 0, "A's gone.go rows must be deleted")
+
+	// A's keep.go rows must survive.
+	aKeepRows, err := s.GetSymbolsForFile(ctx, repoA, "keep.go")
+	require.NoError(t, err)
+	assert.Len(t, aKeepRows, 1, "A's keep.go row must survive")
+
+	// B's gone.go rows must be UNTOUCHED — the delete is scoped to repo_key A.
+	bRows, err := s.GetSymbolsForFile(ctx, repoB, "gone.go")
+	require.NoError(t, err)
+	assert.Len(t, bRows, 2, "B's gone.go rows must survive — delete must be scoped to repo_key A")
 }

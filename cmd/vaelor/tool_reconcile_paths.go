@@ -24,13 +24,14 @@ type ReconcilePathsInput struct {
 
 // reconcilePathsStore is the subset of *embeddings.Store the handler needs.
 // Defined as an interface so tests can supply a fake without a live Postgres
-// pool (and so the dry-run path can assert DeleteRowsByFilePaths is NOT
-// called). *embeddings.Store satisfies it implicitly. Mirrors
+// pool (and so the dry-run path can assert no deletions occur). The interface
+// carries ReconcileRepoPaths so the handler delegates to the SINGLE
+// implementation in internal/embeddings — no parallel adapter (#708 round 2
+// finding 2). *embeddings.Store satisfies it implicitly. Mirrors
 // orphanSweepStore.
 type reconcilePathsStore interface {
 	ListRepoKeysWithSourcePath(ctx context.Context) ([]embeddings.RepoKeySourcePath, error)
-	ListFilePathCounts(ctx context.Context, repoKey string) ([]embeddings.PathCount, error)
-	DeleteRowsByFilePaths(ctx context.Context, repoKey string, paths []string) (int64, error)
+	ReconcileRepoPaths(ctx context.Context, repoKey, sourcePath string, dryRun bool) (*embeddings.ReconcileResult, error)
 }
 
 // registerReconcilePaths registers the reconcile_paths MCP tool.
@@ -92,7 +93,7 @@ func handleReconcilePaths(ctx context.Context, in ReconcilePathsInput, store rec
 		reconciled int
 	)
 	for _, r := range repos {
-		res, rErr := embeddingsReconcile(ctx, store, r.RepoKey, r.SourcePath, dry)
+		res, rErr := store.ReconcileRepoPaths(ctx, r.RepoKey, r.SourcePath, dry)
 		if rErr != nil {
 			return nil, fmt.Errorf("reconcile_paths: repo %s: %w", r.RepoKey, rErr)
 		}
@@ -137,68 +138,4 @@ func dryRunHint(dry bool) string {
 		return "pass dry_run=false to delete"
 	}
 	return "done"
-}
-
-// embeddingsReconcile is the per-repo reconciliation adapter. It uses the
-// store interface to list file paths, check on-disk existence, and optionally
-// delete. The root-missing guard and the gauge update live in
-// embeddings.ReconcileRepoPaths; this adapter calls the store methods
-// directly because the handler's store interface is a subset of *embeddings.Store
-// and cannot call ReconcileRepoPaths (which is a full *Store method).
-//
-// To keep the guard logic in ONE place (embeddings.ReconcileRepoPaths), this
-// adapter delegates to checkStalePaths for the guard and mirrors the
-// dry-run/delete flow. The gauge is set via embeddings.SetStalePathRatioGauge.
-func embeddingsReconcile(ctx context.Context, store reconcilePathsStore, repoKey, sourcePath string, dryRun bool) (*embeddings.ReconcileResult, error) {
-	res := &embeddings.ReconcileResult{
-		RepoKey:    repoKey,
-		SourcePath: sourcePath,
-		DryRun:     dryRun,
-	}
-
-	if sourcePath == "" {
-		res.Skipped = true
-		res.SkipReason = "source_path_empty"
-		embeddings.SetStalePathRatioGauge(repoKey, 0)
-		return res, nil
-	}
-
-	counts, err := store.ListFilePathCounts(ctx, repoKey)
-	if err != nil {
-		return nil, fmt.Errorf("list file paths: %w", err)
-	}
-	for _, pc := range counts {
-		res.TotalRows += pc.Count
-	}
-
-	stale, staleRows, ok := embeddings.CheckStalePaths(sourcePath, counts)
-	if !ok {
-		res.Skipped = true
-		res.SkipReason = "root_missing"
-		return res, nil
-	}
-
-	res.StalePaths = int64(len(stale))
-	res.StaleRows = staleRows
-
-	ratio := 0.0
-	if res.TotalRows > 0 {
-		ratio = float64(res.StaleRows) / float64(res.TotalRows)
-	}
-	embeddings.SetStalePathRatioGauge(repoKey, ratio)
-
-	if dryRun {
-		return res, nil
-	}
-
-	var paths []string
-	for _, pc := range stale {
-		paths = append(paths, pc.Path)
-	}
-	deleted, err := store.DeleteRowsByFilePaths(ctx, repoKey, paths)
-	if err != nil {
-		return nil, fmt.Errorf("delete: %w", err)
-	}
-	res.Deleted = deleted
-	return res, nil
 }

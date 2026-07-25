@@ -472,6 +472,7 @@ func startZeroEmbeddingsCounterWarm(store *embeddings.Store) {
 		}
 		embeddings.WarmRepoStateAdvancedZeroEmbeddings(keys)
 		embeddings.WarmStalePathRatioGauge(keys)
+		embeddings.WarmStalePathUnmeasuredGauge(keys)
 	}()
 }
 

@@ -510,25 +510,6 @@ func (p *Pipeline) compensateFirstIndexOrphan(ctx context.Context, repoKey, stag
 func (p *Pipeline) indexRepoWithTool(
 	ctx context.Context, tool, repoKey, root string, prog *indexProgress,
 ) (*IndexResult, error) {
-	// Path-existence reconciliation (#708): delete rows under this repo_key
-	// whose file_path does not resolve under the repo root. Runs on EVERY
-	// index pass — including the same-SHA fast path below — so a rename
-	// self-heals on the next index rather than needing an operator. The
-	// intra-key orphan reconciliation (deleteIntraKeyOrphans) only runs on
-	// the full-walk path and only covers per-symbol cleanup; it cannot catch
-	// a file_path that belongs to a different project sharing the same
-	// repo_key (the FNV(path) rename collision at the heart of #708).
-	//
-	// Non-fatal: a reconciliation error is logged and swallowed so it never
-	// blocks indexing. The root-missing guard inside ReconcileRepoPaths
-	// ensures a mount blip deletes nothing.
-	if p.reconcilePaths != nil && root != "" {
-		if _, rErr := p.reconcilePaths(ctx, repoKey, root, false); rErr != nil {
-			slog.Warn("indexRepo: path reconciliation failed (non-fatal)",
-				slog.String("repo", repoKey), slog.Any("error", rErr))
-		}
-	}
-
 	// Fast path: skip the entire parse + embed cycle when the repo's main
 	// branch has not moved since the last successful index. Cuts boot-time
 	// embed-server load from "48 repos × N symbols" to zero for unchanged
@@ -575,6 +556,31 @@ func (p *Pipeline) indexRepoWithTool(
 	}
 
 	toEmbed, seen := filterSymbols(symbols, files, existing, result, p.expandSymbolKinds)
+
+	// Path-existence reconciliation (#708): delete rows under this repo_key
+	// whose file_path does not resolve under the repo root. Runs AFTER the
+	// parse so it is gated by the same shrink-guard as the orphan delete
+	// (shrinkGuardFires) — a partial parse must not trigger a stale-path
+	// mass-delete any more than an orphan-key mass-delete. The intra-key
+	// orphan reconciliation (deleteIntraKeyOrphans) only covers per-symbol
+	// cleanup; it cannot catch a file_path that belongs to a different
+	// project sharing the same repo_key (the FNV(path) rename collision at
+	// the heart of #708).
+	//
+	// Non-fatal: a reconciliation error is logged and swallowed so it never
+	// blocks indexing. The root-missing guard inside ReconcileRepoPaths
+	// ensures a mount blip deletes nothing.
+	//
+	// Does NOT run on the same-SHA fast path (above): a fast-path skip means
+	// the repo hasn't changed since the last successful index, so no stale
+	// paths can have appeared. A full-walk index (SHA changed or non-git) is
+	// where renames surface.
+	if p.reconcilePaths != nil && root != "" && !shrinkGuardFires(seen, existing) {
+		if _, rErr := p.reconcilePaths(ctx, repoKey, root, false); rErr != nil {
+			slog.Warn("indexRepo: path reconciliation failed (non-fatal)",
+				slog.String("repo", repoKey), slog.Any("error", rErr))
+		}
+	}
 
 	// Compute the explicit orphan set: DB keys present for this repo_key that
 	// are NOT in the freshly-parsed symbol set. `existing` is the full DB-hash
@@ -717,6 +723,17 @@ func filterSymbols(
 	return toEmbed, seen
 }
 
+// shrinkGuardFires returns true when the parsed symbol-key set is suspiciously
+// small relative to the existing DB-key set — a partial-parse signal that means
+// NO deletes (orphan symbol keys OR stale file_paths) should proceed. The 0.7
+// threshold catches accidental partial-parse mass-delete without blocking
+// legitimate large deletions. Shared by deleteIntraKeyOrphans and the
+// path-existence reconciliation so both delete paths are gated by ONE mechanism
+// and ONE metric (#708 round 2 finding 0).
+func shrinkGuardFires(seen map[string]bool, existing map[string]uint64) bool {
+	return len(existing) > 0 && float64(len(seen)) < 0.7*float64(len(existing))
+}
+
 // deleteIntraKeyOrphans reconciles the DB for repoKey against the freshly-parsed
 // symbol set. Non-fatal: logs a WARN on failure; increments counters on success.
 // Separated from indexRepoWithTool to reduce cognitive complexity.
@@ -727,19 +744,15 @@ func filterSymbols(
 //   - orphanKeys: pre-computed explicit orphan slice = keys in existing NOT in seen.
 //     Passed in so the caller owns the computation and the store method is pure.
 //
-// Shrink-guard: if len(seen) < 70% of len(existing) AND existing is non-empty,
-// the delete is SKIPPED and a WARN is logged. This prevents a partial parse
-// (e.g. parser error on half the files) from mass-deleting valid rows.
-// filterSymbols doc-comment: 'Do not call on a partial parse.'
+// Shrink-guard: if shrinkGuardFires(seen, existing), the delete is SKIPPED and
+// a WARN is logged. This prevents a partial parse (e.g. parser error on half
+// the files) from mass-deleting valid rows. filterSymbols doc-comment: 'Do not
+// call on a partial parse.'
 func deleteIntraKeyOrphans(
 	ctx context.Context, store *Store, repoKey string,
 	seen map[string]bool, existing map[string]uint64, orphanKeys []string,
 ) {
-	// Shrink-guard: skip if the parsed set is too small relative to the DB set.
-	// Threshold 0.7 catches accidental partial-parse mass-delete without blocking
-	// legitimate large deletions (e.g. removing 30%+ of a repo's symbols at once
-	// would require separate confirmation via a deliberate full re-parse pass).
-	if len(existing) > 0 && float64(len(seen)) < 0.7*float64(len(existing)) {
+	if shrinkGuardFires(seen, existing) {
 		slog.Warn("indexRepo: orphan-delete skipped (shrink guard)",
 			slog.String("repo", repoKey),
 			slog.Int("seen", len(seen)),
