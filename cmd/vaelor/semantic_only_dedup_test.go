@@ -37,7 +37,7 @@ func TestSemanticOnlyResult_DedupDropsDuplicate(t *testing.T) {
 		{FilePath: "pkg/auth.go", SymbolName: "Validate", Distance: 0.5178, Source: "semantic"},
 		{FilePath: "pkg/auth.go", SymbolName: "Validate", Distance: 0.6825, Source: "semantic"}, // dup
 	}
-	result, err := semanticOnlyResult(ctx, input, deps, "dedup-test", "/tmp/dedup-test", in, nil, 10, 0.85, time.Now())
+	result, err := semanticOnlyResult(ctx, input, deps, "dedup-test", "/tmp/dedup-test", in, nil, 10, 0.85, 0, time.Now())
 	if err != nil {
 		t.Fatalf("semanticOnlyResult error: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestSemanticOnlyResult_NoDupUnchanged(t *testing.T) {
 		{FilePath: "pkg/a.go", SymbolName: "Bar", Distance: 0.40, Source: "semantic"}, // same file, different symbol
 		{FilePath: "pkg/b.go", SymbolName: "Baz", Distance: 0.50, Source: "semantic"},
 	}
-	result, err := semanticOnlyResult(ctx, input, deps, "dedup-test", "/tmp/dedup-test", in, nil, 10, 0.85, time.Now())
+	result, err := semanticOnlyResult(ctx, input, deps, "dedup-test", "/tmp/dedup-test", in, nil, 10, 0.85, 0, time.Now())
 	if err != nil {
 		t.Fatalf("semanticOnlyResult error: %v", err)
 	}

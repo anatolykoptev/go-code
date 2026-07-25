@@ -38,6 +38,12 @@ type Envelope struct {
 	StaleWarning string `json:"stale_warning,omitempty"`
 	IndexedSHA   string `json:"indexed_sha,omitempty"`
 	LiveSHA      string `json:"live_sha,omitempty"`
+	// GraphStaleAgeS is the age (seconds) of the AGE graph when the retrieval
+	// path fused a stale graph into the search results. Zero (omitted) when
+	// the graph is fresh — the fresh path is byte-identical to pre-#691
+	// behavior. A non-zero value is the degradation marker: the caller
+	// received ranking that blended an outdated graph (#691).
+	GraphStaleAgeS float64 `json:"graph_stale_age_s,omitempty"`
 }
 
 // Wrap builds an Envelope from a measured tool duration and an optional hint.

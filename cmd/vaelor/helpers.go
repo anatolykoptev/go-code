@@ -58,7 +58,7 @@ func textResult(text string) *mcp.CallToolResult {
 // metaResult / metaXMLMarshalResult / metaLargeTextResult previously
 // duplicated.
 func appendMetaFooter(body string, env mcpmeta.Envelope) string {
-	if env.Hint == "" && env.StaleWarning == "" {
+	if env.Hint == "" && env.StaleWarning == "" && env.GraphStaleAgeS == 0 {
 		return body
 	}
 	js, err := json.Marshal(env)

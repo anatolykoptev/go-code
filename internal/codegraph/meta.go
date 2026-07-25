@@ -218,6 +218,79 @@ func resetContentHashMemo() {
 	contentHashMemo.entries = nil
 }
 
+// graphAgeCacheTTL bounds how long a GraphAge result is reused on the
+// retrieval hot path. A burst of semantic_search queries within the TTL
+// doesn't re-read code_graph_meta. Kept at 5s to match contentHashCacheTTL
+// — a git checkout or edit is detected within one query burst, not minutes.
+const graphAgeCacheTTL = 5 * time.Second
+
+// graphAgeMemo is the short-TTL memo for getMeta on the retrieval path.
+var graphAgeMemo = &graphAgeCache{}
+
+type graphAgeCache struct {
+	mu      sync.Mutex
+	entries map[string]graphAgeEntry
+}
+
+type graphAgeEntry struct {
+	meta *GraphMeta
+	at   time.Time
+}
+
+func (c *graphAgeCache) get(root string) (*GraphMeta, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[root]
+	if !ok || time.Since(e.at) > graphAgeCacheTTL {
+		return nil, false
+	}
+	return e.meta, true
+}
+
+func (c *graphAgeCache) set(root string, meta *GraphMeta) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[string]graphAgeEntry)
+	}
+	c.entries[root] = graphAgeEntry{meta: meta, at: time.Now()}
+}
+
+// ResetGraphAgeMemo is exposed for tests that need to bypass the TTL.
+func ResetGraphAgeMemo() {
+	graphAgeMemo.mu.Lock()
+	defer graphAgeMemo.mu.Unlock()
+	graphAgeMemo.entries = nil
+}
+
+// GraphAge returns the age of the cached graph for root and whether it is
+// temporally fresh (BuiltAt within TTLSeconds). Uses a short-TTL in-memory
+// cache (graphAgeCacheTTL = 5s) so a burst of retrieval-path queries doesn't
+// cause a DB round-trip per query. Returns (0, false, nil) when no graph
+// exists yet — the caller treats this as "no graph" (not stale, not fresh).
+//
+// Unlike CacheStatus, this does NOT do the content-hash tree walk — the
+// retrieval path only needs temporal staleness (an 18h-old graph is stale
+// regardless of content hash). The content-hash check is the tool gate's job.
+func GraphAge(ctx context.Context, store *Store, root string) (age time.Duration, fresh bool, err error) {
+	key := GraphNameFor(root)
+	if meta, ok := graphAgeMemo.get(root); ok {
+		if meta == nil {
+			return 0, false, nil
+		}
+		return time.Since(meta.BuiltAt), isFresh(meta.BuiltAt, meta.TTLSeconds), nil
+	}
+	meta, err := getMeta(ctx, store, key)
+	if err != nil {
+		return 0, false, err
+	}
+	graphAgeMemo.set(root, meta)
+	if meta == nil {
+		return 0, false, nil
+	}
+	return time.Since(meta.BuiltAt), isFresh(meta.BuiltAt, meta.TTLSeconds), nil
+}
+
 // CacheStatus checks if a valid cached graph exists for root.
 // Returns (true, nil) if cached and fresh, (false, nil) if not present or stale.
 // Freshness requires BOTH temporal TTL and content-hash match (#592).
