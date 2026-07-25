@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.59.11](https://github.com/anatolykoptev/vaelor/compare/v1.59.10...v1.59.11) (2026-07-25)
+
+
+### Fixed
+
+* **parser:** thread ParseOpts.Parser through Svelte/Astro parse paths ([#713](https://github.com/anatolykoptev/vaelor/issues/713)) ([ea79c21](https://github.com/anatolykoptev/vaelor/commit/ea79c21ed6adc87b7c44dbc93ba70e93bee65cd6))
+
 ## [1.59.10](https://github.com/anatolykoptev/go-code/compare/v1.59.9...v1.59.10) (2026-07-25)
 
 
