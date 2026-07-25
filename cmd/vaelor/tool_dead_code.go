@@ -27,6 +27,7 @@ type xmlDeadCode struct {
 	Dead       int             `xml:"dead,attr"`
 	Ratio      float64         `xml:"ratio,attr"`
 	Tier       string          `xml:"tier,attr,omitempty"`
+	Warming    string          `xml:"warming,attr,omitempty"`
 	DeadStores int             `xml:"dataflowDeadStores,attr,omitempty"`
 	UnusedVars int             `xml:"dataflowUnusedVars,attr,omitempty"`
 	Symbols    []xmlDeadSymbol `xml:"symbol"`
@@ -44,6 +45,10 @@ type xmlDeadSymbol struct {
 	Confidence string  `xml:"confidence,attr"`
 	CEScore    float32 `xml:"ceScore,attr,omitempty"` // CE dead-code probability [0..1]
 }
+
+// deadCodeBuildFromRepo is the production seam for callgraph.BuildFromRepo;
+// handler-level tests can override it to avoid heavy parsing.
+var deadCodeBuildFromRepo = callgraph.BuildFromRepo
 
 // DeadCodeInput is the input schema for the dead_code tool.
 type DeadCodeInput struct {
@@ -80,7 +85,7 @@ func handleDeadCode(ctx context.Context, input DeadCodeInput, deps analyze.Deps,
 	}
 	defer cleanup()
 
-	cg, err := callgraph.BuildFromRepo(ctx, callgraph.TraceRepoInput{
+	cg, err := deadCodeBuildFromRepo(ctx, callgraph.TraceRepoInput{
 		Root:     root,
 		Focus:    input.Focus,
 		Language: input.Language,
@@ -153,6 +158,7 @@ func handleDeadCode(ctx context.Context, input DeadCodeInput, deps analyze.Deps,
 			Dead:    result.DeadCount,
 			Ratio:   result.DeadRatio,
 			Tier:    cg.Tier,
+			Warming: warmingAttr(cg.Warming),
 			Symbols: symbols,
 		},
 	}

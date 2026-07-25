@@ -96,6 +96,12 @@ type Result struct {
 
 	// Mode describes which signals were active: "full", "no-embed", "keyword-only".
 	Mode string
+
+	// Warnings carries meta-signals about the analysis tier, e.g. a
+	// go/types warming note when the call-graph was built on a cold cache.
+	// Surfaced in the XML response so the agent knows to retry for the
+	// enhanced tier. Does not affect what is computed — purely informational.
+	Warnings []string
 }
 
 // SeedSymbol is a symbol that directly matched the query.

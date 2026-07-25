@@ -14,6 +14,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// codeResearchBuildFromRepo is the production seam for callgraph.BuildFromRepo;
+// handler-level tests can override it to avoid heavy parsing.
+var codeResearchBuildFromRepo = callgraph.BuildFromRepo
+
 // CodeResearchInput is the input schema for the code_research tool.
 type CodeResearchInput struct {
 	Repo             string `json:"repo,omitempty" jsonschema:"GitHub repo (owner/repo) or local path. Required in practice — omitting it returns a short error naming recently-indexed repos."`
@@ -69,7 +73,7 @@ func handleCodeResearch(
 		BuildCallGraph: func(ctx context.Context, root string) (*callgraph.CallGraph, error) {
 			cgCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
-			return callgraph.BuildFromRepo(cgCtx, callgraph.TraceRepoInput{Root: root})
+			return codeResearchBuildFromRepo(cgCtx, callgraph.TraceRepoInput{Root: root})
 		},
 	}
 	if semDeps != nil && semDeps.Client != nil && semDeps.QueryClient != nil && semDeps.Store != nil {
@@ -143,6 +147,10 @@ func formatResearchResult(input CodeResearchInput, root string, r *research.Resu
 	// map first ensures it survives budget shaping.
 	if r.Map != "" {
 		resp.Map = &xmlCDATA{Inner: wrapCDATA(r.Map)}
+	}
+
+	if len(r.Warnings) > 0 {
+		resp.Warnings = &researchWarningsXML{Items: r.Warnings}
 	}
 
 	if !input.Compact {

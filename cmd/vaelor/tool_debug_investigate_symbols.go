@@ -17,6 +17,10 @@ import (
 	"github.com/anatolykoptev/vaelor/internal/parser"
 )
 
+// debugInvestigateBuildFromRepo is the production seam for callgraph.BuildFromRepo;
+// handler-level tests can override it to avoid heavy parsing.
+var debugInvestigateBuildFromRepo = callgraph.BuildFromRepo
+
 // isLibraryPath reports whether p refers to a dependency or toolchain path
 // rather than application source code. Used by Phase 3 to detect spans where
 // code.* tags point to library internals (e.g. tower-http's DefaultMakeSpan),
@@ -244,7 +248,7 @@ func runSymbolsPhase(
 				fmt.Sprintf("resolve root %q: %v", repo, resolveErr))
 		} else {
 			defer cleanup()
-			cg, cgErr := callgraph.BuildFromRepo(ctx, callgraph.TraceRepoInput{
+			cg, cgErr := debugInvestigateBuildFromRepo(ctx, callgraph.TraceRepoInput{
 				Root:     resolvedRoot,
 				Language: "go",
 			})
@@ -255,6 +259,14 @@ func runSymbolsPhase(
 			// Expose cg to the orchestrator regardless of build error — it may be
 			// partially populated and still usable for upstream walking.
 			retCG = cg
+
+			// Surface the warming note when go/types enrichment was skipped on a
+			// cold cache (issue #735). The background warm is running; a retry
+			// will return the enhanced tier with type-aware call resolution.
+			if cg != nil && cg.Warming {
+				res.Diagnostics.Warnings = append(res.Diagnostics.Warnings,
+					"type-aware enrichment is warming in the background; retry for the enhanced tier (go/types interface dispatch resolution)")
+			}
 
 			for op, info := range ops {
 				if resolvedFromCodeTags[op] {

@@ -96,6 +96,7 @@ type xmlTraceCounts struct {
 	Direction string         `xml:"direction,attr"`
 	Total     int            `xml:"total,attr"`
 	Files     int            `xml:"files,attr"`
+	Warming   string         `xml:"warming,attr,omitempty"`
 	Nodes     []xmlTraceNode `xml:"node"`
 }
 
@@ -455,6 +456,7 @@ func handleCallTrace(ctx context.Context, input CallTraceInput, deps analyze.Dep
 					Direction: output.Direction,
 					Total:     total,
 					Files:     fileCount,
+					Warming:   warmingAttr(output.Warming),
 					Nodes:     immediateNodes,
 				},
 			}
