@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -14,10 +15,16 @@ import (
 
 // indexedStateSpy implements indexedStateReader with canned values, so the
 // no-results branch can be driven end-to-end without a live Postgres pool.
+// The *Err fields inject read failures so the cold-path collapse arms of
+// repoIsIndexed (GetRepoState error, CountEmbeddings error) can be exercised;
+// nil preserves the canned-value behaviour the sibling tests rely on.
 type indexedStateSpy struct {
 	storedSHA   string
 	storedModel string
 	embCount    int
+	// Optional injected errors. nil ⇒ return the canned value above.
+	getRepoStateErr    error
+	countEmbeddingsErr error
 	// call counters help assert whether the indexed-state check ran.
 	getRepoStateCalls    int
 	countEmbeddingsCalls int
@@ -25,6 +32,13 @@ type indexedStateSpy struct {
 
 func (s *indexedStateSpy) GetRepoState(_ context.Context, _ string) (string, error) {
 	s.getRepoStateCalls++
+	if s.getRepoStateErr != nil {
+		// Return the canned SHA alongside the error so the cold-path
+		// collapse is the ONLY thing guarding a false no_match: dropping
+		// the `err != nil` check must let a non-empty SHA through and RED
+		// the test (anti-vacuity).
+		return s.storedSHA, s.getRepoStateErr
+	}
 	return s.storedSHA, nil
 }
 
@@ -34,6 +48,12 @@ func (s *indexedStateSpy) GetStoredModel(_ context.Context, _ string) string {
 
 func (s *indexedStateSpy) CountEmbeddings(_ context.Context, _ string) (int, error) {
 	s.countEmbeddingsCalls++
+	if s.countEmbeddingsErr != nil {
+		// Return the canned count alongside the error — same anti-vacuity
+		// rationale as GetRepoState: dropping `err != nil` must let a >0
+		// count through and RED the test.
+		return s.embCount, s.countEmbeddingsErr
+	}
 	return s.embCount, nil
 }
 
@@ -245,5 +265,154 @@ func TestHandleSemanticSearch_NoResults_ModelChanged_SchedulesIndex(t *testing.T
 	}
 	if !invalidator.indexAsyncCalled {
 		t.Error("model changed: IndexRepoAsyncWithTool was NOT called — stale-space index never refreshed")
+	}
+}
+
+// --- #709 cold-path collapse arms ---
+//
+// repoIsIndexed documents a cold-path guarantee: any read failure (no row, no
+// git repo, transient DB error) collapses to false so the caller falls through
+// to the indexing path rather than claiming a truthful no_match. The four
+// tests above cover the happy/indexed arms; the three below cover each error
+// collapse arm. An unreadable state must NEVER produce a no_match response —
+// that would be the exact false-promise #709 was filed against.
+//
+// Anti-tautology (red-on-revert contract) — verified in the anti-vacuity run:
+//   - Arm 1: drop the `err != nil` check on GetRepoState (return true on err)
+//     ⇒ status becomes "no_match" AND indexAsyncCalled=false ⇒ BOTH assertions
+//     FAIL.
+//   - Arm 2: drop the `err != nil` check on MainBranchHeadSHA (return true on
+//     err) ⇒ same.
+//   - Arm 3: drop the `err != nil` check on CountEmbeddings (return true on
+//     err) ⇒ same.
+
+// TestHandleSemanticSearch_NoResults_GetRepoStateError_SchedulesIndex covers
+// arm 1 of repoIsIndexed's cold-path collapse: GetRepoState returns an error
+// (e.g. transient DB failure, connection reset). The repo must be treated as
+// not-indexed — index scheduled, "indexing" status — never a no_match.
+func TestHandleSemanticSearch_NoResults_GetRepoStateError_SchedulesIndex(t *testing.T) {
+	const activeModel = "code-rank-embed"
+
+	dir, sha := noResultGitRepo(t)
+
+	state := &indexedStateSpy{
+		storedSHA:       sha, // would match — but the read fails first
+		storedModel:     activeModel,
+		embCount:        12007,
+		getRepoStateErr: errors.New("simulated connection reset: SQLSTATE 08006"),
+	}
+	invalidator := &pipelineInvalidatorSpy{activeModel: activeModel}
+	deps := noResultTestDeps(state, invalidator)
+
+	res, err := handleSemanticSearch(context.Background(), SemanticSearchInput{
+		Repo:  dir,
+		Query: "something that matches nothing",
+	}, deps, "")
+	if err != nil {
+		t.Fatalf("handleSemanticSearch returned error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("handleSemanticSearch returned nil result")
+	}
+
+	text := resultText(res)
+	if strings.Contains(text, "<status>no_match</status>") {
+		t.Error("GetRepoState error collapsed to no_match: " +
+			"an unreadable state must route to indexing, not claim a truthful empty result")
+	}
+	if !strings.Contains(text, "<status>indexing</status>") {
+		t.Errorf("GetRepoState error: expected 'indexing' status, got: %s", text)
+	}
+	if !invalidator.indexAsyncCalled {
+		t.Error("GetRepoState error: IndexRepoAsyncWithTool was NOT called — " +
+			"unreadable state left the repo un-indexed")
+	}
+}
+
+// TestHandleSemanticSearch_NoResults_MainBranchHeadSHAError_SchedulesIndex
+// covers arm 2 of repoIsIndexed's cold-path collapse: MainBranchHeadSHA fails
+// because the root is not a git repo (no .git, no ref resolves). Uses the REAL
+// mcpmeta.MainBranchHeadSHA against a bare TempDir — no stub — so the collapse
+// is exercised on the same live-SHA reader WithFreshness uses.
+func TestHandleSemanticSearch_NoResults_MainBranchHeadSHAError_SchedulesIndex(t *testing.T) {
+	const activeModel = "code-rank-embed"
+
+	// Bare TempDir: no .git, no refs ⇒ MainBranchHeadSHA returns an error.
+	nonGitDir := t.TempDir()
+
+	state := &indexedStateSpy{
+		storedSHA:   "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", // present, but unreadable checkout
+		storedModel: activeModel,
+		embCount:    12007,
+	}
+	invalidator := &pipelineInvalidatorSpy{activeModel: activeModel}
+	deps := noResultTestDeps(state, invalidator)
+
+	res, err := handleSemanticSearch(context.Background(), SemanticSearchInput{
+		Repo:  nonGitDir,
+		Query: "something that matches nothing",
+	}, deps, "")
+	if err != nil {
+		t.Fatalf("handleSemanticSearch returned error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("handleSemanticSearch returned nil result")
+	}
+
+	text := resultText(res)
+	if strings.Contains(text, "<status>no_match</status>") {
+		t.Error("MainBranchHeadSHA error collapsed to no_match: " +
+			"an unreadable checkout must route to indexing, not claim a truthful empty result")
+	}
+	if !strings.Contains(text, "<status>indexing</status>") {
+		t.Errorf("MainBranchHeadSHA error: expected 'indexing' status, got: %s", text)
+	}
+	if !invalidator.indexAsyncCalled {
+		t.Error("MainBranchHeadSHA error: IndexRepoAsyncWithTool was NOT called — " +
+			"unreadable checkout left the repo un-indexed")
+	}
+}
+
+// TestHandleSemanticSearch_NoResults_CountEmbeddingsError_SchedulesIndex
+// covers arm 3 of repoIsIndexed's cold-path collapse: CountEmbeddings returns
+// an error (e.g. SQLSTATE 42P01 — code_embeddings table missing mid-migration,
+// or a transient pool error). SHA matches, model matches, but the count read
+// failed — the repo must be treated as not-indexed, never a no_match.
+func TestHandleSemanticSearch_NoResults_CountEmbeddingsError_SchedulesIndex(t *testing.T) {
+	const activeModel = "code-rank-embed"
+
+	dir, sha := noResultGitRepo(t)
+
+	state := &indexedStateSpy{
+		storedSHA:          sha, // SHA matches
+		storedModel:        activeModel,
+		embCount:           12007, // would be >0 — but the read fails
+		countEmbeddingsErr: errors.New("simulated SQLSTATE 42P01: relation code_embeddings does not exist"),
+	}
+	invalidator := &pipelineInvalidatorSpy{activeModel: activeModel}
+	deps := noResultTestDeps(state, invalidator)
+
+	res, err := handleSemanticSearch(context.Background(), SemanticSearchInput{
+		Repo:  dir,
+		Query: "something that matches nothing",
+	}, deps, "")
+	if err != nil {
+		t.Fatalf("handleSemanticSearch returned error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("handleSemanticSearch returned nil result")
+	}
+
+	text := resultText(res)
+	if strings.Contains(text, "<status>no_match</status>") {
+		t.Error("CountEmbeddings error collapsed to no_match: " +
+			"an unreadable count must route to indexing, not claim a truthful empty result")
+	}
+	if !strings.Contains(text, "<status>indexing</status>") {
+		t.Errorf("CountEmbeddings error: expected 'indexing' status, got: %s", text)
+	}
+	if !invalidator.indexAsyncCalled {
+		t.Error("CountEmbeddings error: IndexRepoAsyncWithTool was NOT called — " +
+			"unreadable count left the repo un-indexed")
 	}
 }
