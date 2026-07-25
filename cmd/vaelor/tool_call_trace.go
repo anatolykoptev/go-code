@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/anatolykoptev/vaelor/internal/analyze"
 	"github.com/anatolykoptev/vaelor/internal/callgraph"
@@ -52,6 +53,9 @@ type xmlTraceNode struct {
 }
 
 func convertTraceNodes(nodes []callgraph.CallChainNode) []xmlTraceNode {
+	if callTraceConvertCount != nil {
+		atomic.AddInt64(callTraceConvertCount, 1)
+	}
 	result := make([]xmlTraceNode, len(nodes))
 	for i, n := range nodes {
 		xn := xmlTraceNode{
@@ -192,6 +196,18 @@ func marshalTraceXML(v any) string {
 // package-level variable so handler-level tests can simulate an AGE miss
 // without requiring a live AGE graph.
 var callTraceTraceFromAGE = codegraph.TraceFromAGE
+
+// callTraceConvertCount is a test-only seam for the render-count laziness
+// assertion. Nil in production (zero overhead); tests set it to an int64
+// counter that convertTraceNodes increments via atomic.AddInt64 on each
+// (recursive) call. The test then asserts the count matches exactly one
+// rung's worth of convertTraceNodes calls when rung 1 fits — proving the
+// unreached rungs were never rendered. Without this, the eager-render form
+// (building all three response structs before the ladder runs) comes
+// straight back with a green suite, because TestPickFitting_UnreachedRung-
+// ClosureNeverCalled tests PickFitting in isolation and cannot see what
+// the caller does before calling it.
+var callTraceConvertCount *int64
 
 // callTraceStatusXML is the building-status short-circuit response for call_trace.
 // It mirrors the normal <response><trace.../> shape with status/message attrs.
@@ -376,61 +392,70 @@ func handleCallTrace(ctx context.Context, input CallTraceInput, deps analyze.Dep
 	// graph before any result exists — the ladder must not run on that
 	// path, and it doesn't: the gate returns at line ~218, well before
 	// here).
-	fullResp := xmlTraceResponse{
-		Trace: xmlTrace{
-			Symbol:                output.Symbol,
-			Direction:             output.Direction,
-			TotalNodes:            output.Stats.TotalNodes,
-			MaxDepth:              output.Stats.MaxDepth,
-			Resolved:              output.Stats.Resolved,
-			Unresolved:            output.Stats.Unresolved,
-			ResolvedRatio:         output.Stats.ResolvedRatio,
-			Tier:                  output.Tier,
-			ProductionCallerCount: output.ProductionCallerCount,
-			Nodes:                 convertTraceNodes(output.CallTree),
-		},
-	}
-	if output.Narrative != "" {
-		fullResp.Trace.Narrative = &xmlCDATA{Inner: wrapCDATA(output.Narrative)}
-	}
-
-	// Rung 2: depth-1 — direct callers/callees only, deeper levels dropped.
-	// MUST state that deeper levels were dropped and how many were elided
-	// (a silently shallow tree is a wrong answer, not a condensed one).
-	prunedTree, elided := pruneTraceToDepth1(output.CallTree)
-	depth1Resp := xmlTraceResponse{
-		Trace: xmlTrace{
-			Symbol:                output.Symbol,
-			Direction:             output.Direction,
-			TotalNodes:            output.Stats.TotalNodes,
-			MaxDepth:              output.Stats.MaxDepth,
-			Resolved:              output.Stats.Resolved,
-			Unresolved:            output.Stats.Unresolved,
-			ResolvedRatio:         output.Stats.ResolvedRatio,
-			Tier:                  output.Tier,
-			ProductionCallerCount: output.ProductionCallerCount,
-			Condensed:             "depth-1",
-			Elided:                elided,
-			Nodes:                 convertTraceNodes(prunedTree),
-		},
-	}
-
-	// Rung 3: counts — N callers/callees across M files + immediate list.
-	total, fileCount, immediateNodes := buildTraceCounts(output.CallTree)
-	countsResp := xmlTraceCountsResponse{
-		Trace: xmlTraceCounts{
-			Symbol:    output.Symbol,
-			Direction: output.Direction,
-			Total:     total,
-			Files:     fileCount,
-			Nodes:     immediateNodes,
-		},
-	}
-
+	//
+	// Laziness: each rung's rendering work (struct construction +
+	// convertTraceNodes + marshalTraceXML) is INSIDE the closure, so an
+	// unreached rung is never rendered. The common case (full tree fits
+	// rung 1) does exactly one render, not three.
 	ladder := mcpmeta.Ladder{
-		{Name: "full", Render: func() string { return marshalTraceXML(fullResp) }},
-		{Name: "depth-1", Render: func() string { return marshalTraceXML(depth1Resp) }},
-		{Name: "counts", Render: func() string { return marshalTraceXML(countsResp) }},
+		{Name: "full", Render: func() string {
+			resp := xmlTraceResponse{
+				Trace: xmlTrace{
+					Symbol:                output.Symbol,
+					Direction:             output.Direction,
+					TotalNodes:            output.Stats.TotalNodes,
+					MaxDepth:              output.Stats.MaxDepth,
+					Resolved:              output.Stats.Resolved,
+					Unresolved:            output.Stats.Unresolved,
+					ResolvedRatio:         output.Stats.ResolvedRatio,
+					Tier:                  output.Tier,
+					ProductionCallerCount: output.ProductionCallerCount,
+					Nodes:                 convertTraceNodes(output.CallTree),
+				},
+			}
+			if output.Narrative != "" {
+				resp.Trace.Narrative = &xmlCDATA{Inner: wrapCDATA(output.Narrative)}
+			}
+			return marshalTraceXML(resp)
+		}},
+		{Name: "depth-1", Render: func() string {
+			// Rung 2: depth-1 — direct callers/callees only, deeper levels
+			// dropped. MUST state that deeper levels were dropped and how
+			// many were elided (a silently shallow tree is a wrong answer,
+			// not a condensed one).
+			prunedTree, elided := pruneTraceToDepth1(output.CallTree)
+			resp := xmlTraceResponse{
+				Trace: xmlTrace{
+					Symbol:                output.Symbol,
+					Direction:             output.Direction,
+					TotalNodes:            output.Stats.TotalNodes,
+					MaxDepth:              output.Stats.MaxDepth,
+					Resolved:              output.Stats.Resolved,
+					Unresolved:            output.Stats.Unresolved,
+					ResolvedRatio:         output.Stats.ResolvedRatio,
+					Tier:                  output.Tier,
+					ProductionCallerCount: output.ProductionCallerCount,
+					Condensed:             "depth-1",
+					Elided:                elided,
+					Nodes:                 convertTraceNodes(prunedTree),
+				},
+			}
+			return marshalTraceXML(resp)
+		}},
+		{Name: "counts", Render: func() string {
+			// Rung 3: counts — N callers/callees across M files + immediate list.
+			total, fileCount, immediateNodes := buildTraceCounts(output.CallTree)
+			resp := xmlTraceCountsResponse{
+				Trace: xmlTraceCounts{
+					Symbol:    output.Symbol,
+					Direction: output.Direction,
+					Total:     total,
+					Files:     fileCount,
+					Nodes:     immediateNodes,
+				},
+			}
+			return marshalTraceXML(resp)
+		}},
 	}
 	body := renderLadder(ladder, "call_trace", outputDir, mcpmeta.DefaultBudget)
 	return textResult(body), nil

@@ -354,3 +354,50 @@ func TestCallTrace_Depth1Rung_StatesDeeperLevelsDropped(t *testing.T) {
 		t.Fatalf("depth-1 rung must state how many nodes were elided, got %d", resp.Trace.Elided)
 	}
 }
+
+// TestCallTrace_Rung1Fits_RendersExactlyOne proves laziness at the adoption
+// site: when the call tree fits rung 1 (the common case), EXACTLY ONE rung's
+// worth of convertTraceNodes calls is made — not all three. The spy
+// (callTraceConvertCount) is incremented inside convertTraceNodes on every
+// (recursive) call. The test uses a root-only tree (no children) so
+// convertTraceNodes is called exactly once per rung. If the eager-render form
+// comes back (building all three response structs before the ladder runs),
+// convertTraceNodes is called 3 times → count 3 → RED.
+//
+// RED-on-revert: move the struct construction back out of the closures
+// (eager pre-rendering) and the count jumps to 3 → RED.
+func TestCallTrace_Rung1Fits_RendersExactlyOne(t *testing.T) {
+	// Root-only tree: no children → convertTraceNodes is called exactly
+	// once per top-level invocation (no recursive calls).
+	rootOnly := &parser.Symbol{Name: "Foo", Kind: "function", File: "main.go", StartLine: 1, EndLine: 10}
+	rootResult := &callgraph.TraceResult{
+		Root:       rootOnly,
+		Tree:       []callgraph.CallChainNode{{Symbol: rootOnly}},
+		TotalNodes: 1,
+		MaxDepth:   0,
+		Resolved:   1,
+	}
+	cleanup := setupCallTraceAgeSeam(t, rootResult)
+	defer cleanup()
+
+	input := CallTraceInput{
+		Repo:    t.TempDir(),
+		Symbol:  "Foo",
+		Compact: true,
+	}
+	deps := callTraceLadderDeps()
+	store := &codegraph.Store{}
+
+	var count int64
+	callTraceConvertCount = &count
+	defer func() { callTraceConvertCount = nil }()
+
+	_, err := handleCallTrace(context.Background(), input, deps, nil, "", store)
+	if err != nil {
+		t.Fatalf("handleCallTrace: %v", err)
+	}
+
+	if count != 1 {
+		t.Fatalf("rung-1-fits case must render EXACTLY ONE rung (1 convertTraceNodes call for root-only tree), got %d (eager-render regression)", count)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/anatolykoptev/go-kit/embed"
@@ -113,8 +114,21 @@ const (
 	semanticSearchRetryHint = "Please retry in 30-60 seconds."
 )
 
+// semanticFormatCount is a test-only seam for the render-count laziness
+// assertion. Nil in production (zero overhead); tests set it to an int64
+// counter that the three formatSemanticResults* functions increment via
+// atomic.AddInt64. The test then asserts EXACTLY ONE increment when rung 1
+// fits — proving the unreached rungs were never rendered. Without this, the
+// eager-render form (pre-computing all three renderings before the ladder
+// runs) comes straight back with a green suite, because
+// TestPickFitting_UnreachedRungClosureNeverCalled tests PickFitting in
+// isolation and cannot see what the caller does before calling it.
+var semanticFormatCount *int64
+
 // registerSemanticSearch registers the semantic_search MCP tool.
-func registerSemanticSearch(server *mcp.Server, _ Config, deps SemanticDeps) {
+func registerSemanticSearch(server *mcp.Server, cfg Config, deps SemanticDeps) {
+	outputDir := cfg.OutputDir
+
 	addTool(server, &mcp.Tool{
 		Name: "semantic_search",
 		Description: "Find code by meaning using natural language queries. " +
@@ -122,12 +136,12 @@ func registerSemanticSearch(server *mcp.Server, _ Config, deps SemanticDeps) {
 			"Works best after the repository has been indexed via code_graph or repo_analyze. " +
 			"Returns ranked results with file paths, symbol names, and similarity scores.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input SemanticSearchInput) (*mcp.CallToolResult, error) {
-		return handleSemanticSearch(ctx, input, deps)
+		return handleSemanticSearch(ctx, input, deps, outputDir)
 	})
 }
 
 func handleSemanticSearch(
-	ctx context.Context, input SemanticSearchInput, deps SemanticDeps,
+	ctx context.Context, input SemanticSearchInput, deps SemanticDeps, outputDir string,
 ) (*mcp.CallToolResult, error) {
 	if input.Repo == "" {
 		return errResult(shortMissingRepoMsg(ctx, deps.Store, deps.AnalyzeDeps.LocalRepoDirs)), nil
@@ -262,7 +276,7 @@ func handleSemanticSearch(
 						semanticSearchGraphHint+" "+semanticSearchRetryHint), nil
 			}
 		}
-		return handleSemanticHits(softCtx, input, deps, repoKey, root, results, topK, maxDist, t0)
+		return handleSemanticHits(softCtx, input, deps, repoKey, root, results, topK, maxDist, outputDir, t0)
 	}
 
 	// No results — start background indexing if not already running.
@@ -293,7 +307,7 @@ func handleSemanticSearch(
 func handleSemanticHits(
 	ctx context.Context, input SemanticSearchInput, deps SemanticDeps,
 	repoKey, root string, results []embeddings.SearchResult, topK int, maxDist float32,
-	t0 time.Time,
+	outputDir string, t0 time.Time,
 ) (*mcp.CallToolResult, error) {
 	// Trigger background re-index for freshness.
 	if deps.Pipeline != nil {
@@ -396,9 +410,9 @@ func handleSemanticHits(
 	}
 
 	if len(matched) > 0 || len(sparseHits) > 0 || len(graphHits) > 0 {
-		return hybridResult(ctx, input, deps, repoKey, root, results, matched, sparseHits, graphHits, prSignals, rerankCap, topK, graphStaleAgeS, t0)
+		return hybridResult(ctx, input, deps, repoKey, root, results, matched, sparseHits, graphHits, prSignals, rerankCap, topK, graphStaleAgeS, outputDir, t0)
 	}
-	return semanticOnlyResult(ctx, input, deps, repoKey, root, results, prSignals, topK, maxDist, graphStaleAgeS, t0)
+	return semanticOnlyResult(ctx, input, deps, repoKey, root, results, prSignals, topK, maxDist, graphStaleAgeS, outputDir, t0)
 }
 
 // runGraphArm generates graph-arm candidates for MergeRRF.
@@ -436,7 +450,7 @@ func hybridResult(
 	repoKey, root string, semantic []embeddings.SearchResult,
 	matched []embeddings.KeywordHit, sparse []embeddings.SparseHit, graph []embeddings.GraphHit,
 	prSignals []graphx.Signal,
-	rerankCap, topK int, graphStaleAgeS float64, t0 time.Time,
+	rerankCap, topK int, graphStaleAgeS float64, outputDir string, t0 time.Time,
 ) (*mcp.CallToolResult, error) {
 	// Build the union of candidate symbols so the signal arms (hotspot/recency)
 	// can rank the same pool the primary retrievers produced.
@@ -452,7 +466,7 @@ func hybridResult(
 		flat[i] = h.SearchResult
 		flat[i].Source = h.Source
 	}
-	return finalResult(ctx, input, deps, repoKey, root, flat, prSignals, topK, graphStaleAgeS, t0)
+	return finalResult(ctx, input, deps, repoKey, root, flat, prSignals, topK, graphStaleAgeS, outputDir, t0)
 }
 
 // semanticOnlyResult filters by distance then applies CE rerank → annotate → format.
@@ -468,7 +482,7 @@ func semanticOnlyResult(
 	ctx context.Context, input SemanticSearchInput, deps SemanticDeps,
 	repoKey, root string, results []embeddings.SearchResult,
 	prSignals []graphx.Signal,
-	topK int, maxDist float32, graphStaleAgeS float64, t0 time.Time,
+	topK int, maxDist float32, graphStaleAgeS float64, outputDir string, t0 time.Time,
 ) (*mcp.CallToolResult, error) {
 	// Fallback to pure semantic — filter by distance (graph results have Distance=1.0).
 	// Dedup by FilePath+":"+SymbolName, keeping the lowest Distance (best match).
@@ -513,7 +527,7 @@ func semanticOnlyResult(
 		flat[i] = h.SearchResult
 		flat[i].Source = h.Source
 	}
-	return finalResult(ctx, input, deps, repoKey, root, flat, prSignals, topK, graphStaleAgeS, t0)
+	return finalResult(ctx, input, deps, repoKey, root, flat, prSignals, topK, graphStaleAgeS, outputDir, t0)
 }
 
 // finalResult runs stale-demote → CE reranking → PageRank annotation → freshness wrap → format.
@@ -524,7 +538,7 @@ func finalResult(
 	ctx context.Context, input SemanticSearchInput, deps SemanticDeps,
 	repoKey, root string, candidates []embeddings.SearchResult,
 	prSignals []graphx.Signal,
-	topK int, graphStaleAgeS float64, t0 time.Time,
+	topK int, graphStaleAgeS float64, outputDir string, t0 time.Time,
 ) (*mcp.CallToolResult, error) {
 	// Stale-demote safety-net (defense-in-depth on top of Bug B orphan hard-delete):
 	// partition fresh-then-stale so missed orphan rows surface at the bottom, not
@@ -573,16 +587,19 @@ func finalResult(
 	// ladder guarantees len(body) <= budget, and Shape(body, budget, "") is
 	// a no-op because body fits.
 	mappings := deps.AnalyzeDeps.PathMappings
-	fullRender := appendMetaFooter(formatSemanticResults(input, reranked, mappings), env)
-	compactRender := appendMetaFooter(formatSemanticResultsCompact(input, reranked, mappings), env)
-	countsRender := appendMetaFooter(formatSemanticResultsCounts(input, reranked, mappings), env)
 	ladder := mcpmeta.Ladder{
-		{Name: "full", Render: func() string { return fullRender }},
-		{Name: "no-snippet", Render: func() string { return compactRender }},
-		{Name: "counts", Render: func() string { return countsRender }},
+		{Name: "full", Render: func() string {
+			return appendMetaFooter(formatSemanticResults(input, reranked, mappings), env)
+		}},
+		{Name: "no-snippet", Render: func() string {
+			return appendMetaFooter(formatSemanticResultsCompact(input, reranked, mappings), env)
+		}},
+		{Name: "counts", Render: func() string {
+			return appendMetaFooter(formatSemanticResultsCounts(input, reranked, mappings), env)
+		}},
 	}
 	budget := mcpmeta.ResolveBudget(input.MaxBytes, mcpmeta.DefaultBudget)
-	body := renderLadder(ladder, "semantic_search", "", budget)
+	body := renderLadder(ladder, "semantic_search", outputDir, budget)
 	if input.MaxBytes > 0 {
 		body = mcpmeta.MarkBudgetApplied(body)
 	}
@@ -627,6 +644,9 @@ func annotateWithPageRank(results []embeddings.SearchResult, signals []graphx.Si
 }
 
 func formatSemanticResults(input SemanticSearchInput, results []embeddings.SearchResult, mappings []analyze.PathMapping) string {
+	if semanticFormatCount != nil {
+		atomic.AddInt64(semanticFormatCount, 1)
+	}
 	resp := semanticRespXML{
 		Tool:    "semantic_search",
 		Query:   input.Query,
@@ -659,6 +679,9 @@ func formatSemanticResults(input SemanticSearchInput, results []embeddings.Searc
 // formatSemanticResultsCompact is ladder rung 2: file/line/symbol/distance per
 // hit, every hit listed, auxiliary attrs (pagerank/source/language) dropped.
 func formatSemanticResultsCompact(input SemanticSearchInput, results []embeddings.SearchResult, mappings []analyze.PathMapping) string {
+	if semanticFormatCount != nil {
+		atomic.AddInt64(semanticFormatCount, 1)
+	}
 	resp := semanticCompactRespXML{
 		Tool:    "semantic_search",
 		Query:   input.Query,
@@ -680,6 +703,9 @@ func formatSemanticResultsCompact(input SemanticSearchInput, results []embedding
 // formatSemanticResultsCounts is ladder rung 3: per-file hit counts + total,
 // ordered by descending count.
 func formatSemanticResultsCounts(input SemanticSearchInput, results []embeddings.SearchResult, mappings []analyze.PathMapping) string {
+	if semanticFormatCount != nil {
+		atomic.AddInt64(semanticFormatCount, 1)
+	}
 	counts := make(map[string]int, len(results))
 	order := make([]string, 0, len(results))
 	for _, r := range results {

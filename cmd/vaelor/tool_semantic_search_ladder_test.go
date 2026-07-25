@@ -106,7 +106,7 @@ func TestSemanticSearch_LargeResultUnderBudget_IsParseableXML(t *testing.T) {
 	}
 
 	res, err := finalResult(context.Background(), input, deps, "repokey", "/test/repo",
-		candidates, nil, 100, 0, time.Now())
+		candidates, nil, 100, 0, "", time.Now())
 	if err != nil {
 		t.Fatalf("finalResult: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestSemanticSearch_CeilingHolds(t *testing.T) {
 		MaxBytes: 4096,
 	}
 	smallRes, err := finalResult(context.Background(), smallInput, deps, "repokey", "/test/repo",
-		smallCandidates, nil, 5, 0, time.Now())
+		smallCandidates, nil, 5, 0, "", time.Now())
 	if err != nil {
 		t.Fatalf("finalResult small: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestSemanticSearch_CeilingHolds(t *testing.T) {
 		MaxBytes: 4096,
 	}
 	largeRes, err := finalResult(context.Background(), largeInput, deps, "repokey", "/test/repo",
-		largeCandidates, nil, 100, 0, time.Now())
+		largeCandidates, nil, 100, 0, "", time.Now())
 	if err != nil {
 		t.Fatalf("finalResult large: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestSemanticSearch_CondensationNote_PresentBelowRung1_AbsentOnRung1(t *test
 	smallRes, err := finalResult(context.Background(),
 		SemanticSearchInput{Repo: "/test/repo", Query: "test", TopK: 5},
 		deps, "repokey", "/test/repo",
-		buildSemanticCandidates(5, 5), nil, 5, 0, time.Now())
+		buildSemanticCandidates(5, 5), nil, 5, 0, "", time.Now())
 	if err != nil {
 		t.Fatalf("finalResult small: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestSemanticSearch_CondensationNote_PresentBelowRung1_AbsentOnRung1(t *test
 	largeRes, err := finalResult(context.Background(),
 		SemanticSearchInput{Repo: "/test/repo", Query: "test", TopK: 100},
 		deps, "repokey", "/test/repo",
-		buildSemanticCandidates(100, 10), nil, 100, 0, time.Now())
+		buildSemanticCandidates(100, 10), nil, 100, 0, "", time.Now())
 	if err != nil {
 		t.Fatalf("finalResult large: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestSemanticSearch_MaxBytesSmallerThanDefaultHonoured(t *testing.T) {
 		MaxBytes: 2048,
 	}
 	res, err := finalResult(context.Background(), input, deps, "repokey", "/test/repo",
-		candidates, nil, 100, 0, time.Now())
+		candidates, nil, 100, 0, "", time.Now())
 	if err != nil {
 		t.Fatalf("finalResult: %v", err)
 	}
@@ -258,12 +258,12 @@ func TestSemanticSearch_MaxBytesSmallerThanDefaultHonoured(t *testing.T) {
 }
 
 // TestSemanticSearch_LargeResultWithOutputDir_FileSaved verifies the file-save
-// escape hatch via renderLadder directly: when outputDir is set and the ladder
-// condenses, the full rendering is persisted to a file and the returned text
-// references it. semantic_search's handler does not wire outputDir today (it
-// passes "" to renderLadder), so this test exercises renderLadder with the
-// semantic_search ladder shapes to prove the file-save path works for this
-// tool's rungs.
+// escape hatch via the HANDLER path (finalResult with outputDir threaded
+// through): when outputDir is set and the ladder condenses, the full rendering
+// is persisted to a file and the returned text references it.
+//
+// RED-on-revert: revert finalResult's renderLadder call to pass "" for
+// outputDir and this test goes RED (no "saved to:" pointer in the body).
 func TestSemanticSearch_LargeResultWithOutputDir_FileSaved(t *testing.T) {
 	deps := semanticLadderDeps()
 	candidates := buildSemanticCandidates(100, 10)
@@ -273,37 +273,30 @@ func TestSemanticSearch_LargeResultWithOutputDir_FileSaved(t *testing.T) {
 		TopK:  100,
 	}
 
-	// Build the same ladder finalResult builds, but pass outputDir to
-	// renderLadder directly (finalResult hardcodes "" for outputDir).
-	mappings := deps.AnalyzeDeps.PathMappings
-	fullRender := formatSemanticResults(input, candidates, mappings)
-	compactRender := formatSemanticResultsCompact(input, candidates, mappings)
-	countsRender := formatSemanticResultsCounts(input, candidates, mappings)
-	ladder := mcpmeta.Ladder{
-		{Name: "full", Render: func() string { return fullRender }},
-		{Name: "no-snippet", Render: func() string { return compactRender }},
-		{Name: "counts", Render: func() string { return countsRender }},
-	}
-
 	outputDir := t.TempDir()
-	body := renderLadder(ladder, "semantic_search", outputDir, mcpmeta.DefaultBudget)
+	res, err := finalResult(context.Background(), input, deps, "repokey", "/test/repo",
+		candidates, nil, 100, 0, outputDir, time.Now())
+	if err != nil {
+		t.Fatalf("finalResult: %v", err)
+	}
+	text := semanticResultText(t, res)
 
 	// 1. The returned text must reference the saved file.
-	if !strings.Contains(body, "full-result:") || !strings.Contains(body, "saved to:") {
-		t.Fatalf("returned text must reference the saved file, got (first 400 chars):\n%s", truncForLog(body, 400))
+	if !strings.Contains(text, "full-result:") || !strings.Contains(text, "saved to:") {
+		t.Fatalf("returned text must reference the saved file, got (first 400 chars):\n%s", truncForLog(text, 400))
 	}
 
 	// 2. Extract the file path.
-	pathStart := strings.Index(body, "saved to: ")
+	pathStart := strings.Index(text, "saved to: ")
 	if pathStart < 0 {
 		t.Fatal("cannot find 'saved to:' in pointer")
 	}
 	pathStart += len("saved to: ")
-	pathEnd := strings.Index(body[pathStart:], " —")
+	pathEnd := strings.Index(text[pathStart:], " —")
 	if pathEnd < 0 {
 		t.Fatal("cannot find end of path in pointer")
 	}
-	savedPath := body[pathStart : pathStart+pathEnd]
+	savedPath := text[pathStart : pathStart+pathEnd]
 
 	// 3. The file MUST exist with the full rendering.
 	fileContent, err := os.ReadFile(savedPath)
@@ -319,12 +312,45 @@ func TestSemanticSearch_LargeResultWithOutputDir_FileSaved(t *testing.T) {
 	}
 
 	// 4. The inline body must be valid, parseable XML (the condensed rung).
-	if err := parseSemanticXML(body); err != nil {
-		t.Fatalf("inline body must be parseable XML: %v\n(first 400 chars):\n%s", err, truncForLog(body, 400))
+	if err := parseSemanticXML(text); err != nil {
+		t.Fatalf("inline body must be parseable XML: %v\n(first 400 chars):\n%s", err, truncForLog(text, 400))
 	}
 
 	// 5. Ceiling must hold.
-	if len(body) > mcpmeta.DefaultBudget {
-		t.Fatalf("ceiling violated: len(body)=%d > DefaultBudget=%d", len(body), mcpmeta.DefaultBudget)
+	if len(text) > mcpmeta.DefaultBudget {
+		t.Fatalf("ceiling violated: len(text)=%d > DefaultBudget=%d", len(text), mcpmeta.DefaultBudget)
+	}
+}
+
+// TestSemanticSearch_Rung1Fits_RendersExactlyOne proves laziness at the
+// adoption site: when the result fits rung 1 (the common case), EXACTLY ONE
+// rung rendering is computed — not all three. The spy (semanticFormatCount)
+// is incremented inside each formatSemanticResults* function; if the
+// eager-render form comes back (pre-computing all three renderings before
+// the ladder runs), the count is 3 and this test goes RED.
+//
+// RED-on-revert: move the formatSemanticResults* calls back out of the closures
+// (eager pre-rendering) and the count jumps to 3 → RED.
+func TestSemanticSearch_Rung1Fits_RendersExactlyOne(t *testing.T) {
+	deps := semanticLadderDeps()
+	candidates := buildSemanticCandidates(5, 5) // small — fits rung 1
+	input := SemanticSearchInput{
+		Repo:  "/test/repo",
+		Query: "handle request",
+		TopK:  5,
+	}
+
+	var count int64
+	semanticFormatCount = &count
+	defer func() { semanticFormatCount = nil }()
+
+	_, err := finalResult(context.Background(), input, deps, "repokey", "/test/repo",
+		candidates, nil, 5, 0, "", time.Now())
+	if err != nil {
+		t.Fatalf("finalResult: %v", err)
+	}
+
+	if count != 1 {
+		t.Fatalf("rung-1-fits case must render EXACTLY ONE rung, got %d (eager-render regression)", count)
 	}
 }

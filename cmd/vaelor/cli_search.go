@@ -106,7 +106,7 @@ func runSearch(cfg Config, args []string) {
 	result, err := handleSemanticSearch(ctx, SemanticSearchInput{
 		Repo:  repo,
 		Query: query,
-	}, semDeps)
+	}, semDeps, "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "search: %v\n", err)
 		os.Exit(1)
