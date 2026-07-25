@@ -2,6 +2,14 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.59.13](https://github.com/anatolykoptev/vaelor/compare/v1.59.12...v1.59.13) (2026-07-25)
+
+
+### Fixed
+
+* **embeddings:** route IncrementalSync same-SHA fast path through shared reconcile seam ([#720](https://github.com/anatolykoptev/vaelor/issues/720)) ([#725](https://github.com/anatolykoptev/vaelor/issues/725)) ([e33195a](https://github.com/anatolykoptev/vaelor/commit/e33195a907411e921f1b04157f4aeee0122f6d91))
+* **semantic_search:** return no-match, not "indexing", when an indexed repo has zero hits ([#722](https://github.com/anatolykoptev/vaelor/issues/722)) ([7620567](https://github.com/anatolykoptev/vaelor/commit/76205676608e0af3680ab68a3f73d5f13b9a0437))
+
 ## [1.59.12](https://github.com/anatolykoptev/vaelor/compare/v1.59.11...v1.59.12) (2026-07-25)
 
 
