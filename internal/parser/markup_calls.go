@@ -52,7 +52,7 @@ func remapCallLines(calls []CallSite, lineMap []uint32) []CallSite {
 // (Astro, Svelte) run the delegated grammar over the SCRIPT region ONLY, so the
 // template body is served solely by MarkupCalls — one producer per region, no
 // duplicate/garbled edges from parsing the raw non-TS file.
-func scriptRegionCalls(path string, vs *preproc.VirtualSource) []CallSite {
+func scriptRegionCalls(path string, vs *preproc.VirtualSource, ps *sitter.Parser) []CallSite {
 	if vs == nil || len(vs.Code) == 0 {
 		return nil
 	}
@@ -61,7 +61,7 @@ func scriptRegionCalls(path string, vs *preproc.VirtualSource) []CallSite {
 		return nil
 	}
 
-	root, closeTree, err := parseTree(caps.SitterLanguage, vs.Code, nil)
+	root, closeTree, err := parseTree(caps.SitterLanguage, vs.Code, ps)
 	if err != nil {
 		return nil
 	}
@@ -89,7 +89,7 @@ func scriptRegionCalls(path string, vs *preproc.VirtualSource) []CallSite {
 // via remapCallLines; padding lines are dropped. This mirrors the
 // collectRuneSymbols / parseSvelteWithRunes post-parse-classifier precedent (operate
 // on the original src via a VirtualSource, remap afterwards).
-func markupExprReparse(path string, vs *preproc.VirtualSource) []CallSite {
+func markupExprReparse(path string, vs *preproc.VirtualSource, ps *sitter.Parser) []CallSite {
 	if vs == nil || len(vs.Code) == 0 {
 		return nil
 	}
@@ -98,7 +98,7 @@ func markupExprReparse(path string, vs *preproc.VirtualSource) []CallSite {
 		return nil
 	}
 
-	root, closeTree, err := parseTree(lang, vs.Code, nil)
+	root, closeTree, err := parseTree(lang, vs.Code, ps)
 	if err != nil {
 		return nil
 	}
@@ -115,26 +115,25 @@ func markupExprReparse(path string, vs *preproc.VirtualSource) []CallSite {
 // ScriptCalls satisfies scriptCallSource (see calls.go) for Astro: script-region
 // calls come from the extracted frontmatter + <script> VirtualSource, clean and
 // line-remapped — never a raw CallsQuery over the .astro file.
-func (h *astroHandler) ScriptCalls(path string, src []byte, _ ParseOpts) []CallSite {
-	return scriptRegionCalls(path, preproc.ExtractAstro(src))
+func (h *astroHandler) ScriptCalls(path string, src []byte, opts ParseOpts) []CallSite {
+	return scriptRegionCalls(path, preproc.ExtractAstro(src), opts.Parser)
 }
 
 // MarkupCalls satisfies markupCallSource (see calls.go): the Astro handler's
 // template body carries {expr} call sites, surfaced by reparsing the batched
 // template expressions with the TSX grammar. This is the SOLE producer of Astro's
 // template-region calls (the raw CallsQuery is not run for scriptCallSource
-// handlers). opts is inert for call extraction today (the markup reparse is
-// language-fixed to TSX); it is kept to satisfy the interface and leave room for a
-// future Language-conditional branch.
-func (h *astroHandler) MarkupCalls(path string, src []byte, _ ParseOpts) []CallSite {
-	return markupExprReparse(path, preproc.ExtractMarkupExprs(src))
+// handlers). opts.Parser is honored when non-nil so callers can reuse a parser
+// across files; the markup reparse is still language-fixed to TSX.
+func (h *astroHandler) MarkupCalls(path string, src []byte, opts ParseOpts) []CallSite {
+	return markupExprReparse(path, preproc.ExtractMarkupExprs(src), opts.Parser)
 }
 
 // ScriptCalls satisfies scriptCallSource (see calls.go) for Svelte: script-region
 // calls come from the extracted <script>/<script module> VirtualSource, clean and
 // line-remapped — never a raw CallsQuery over the .svelte file.
-func (h *svelteHandler) ScriptCalls(path string, src []byte, _ ParseOpts) []CallSite {
-	return scriptRegionCalls(path, preproc.ExtractSvelte(src))
+func (h *svelteHandler) ScriptCalls(path string, src []byte, opts ParseOpts) []CallSite {
+	return scriptRegionCalls(path, preproc.ExtractSvelte(src), opts.Parser)
 }
 
 // MarkupCalls satisfies markupCallSource (see calls.go) for Svelte: the template
@@ -143,10 +142,10 @@ func (h *svelteHandler) ScriptCalls(path string, src []byte, _ ParseOpts) []Call
 // {@const NAME = EXPR}, {@html EXPR}, {@render EXPR}). preproc.ExtractSvelteMarkupExprs
 // is the sigil-aware scanner; the reparse path is shared with Astro
 // (markupExprReparse). This is the SOLE producer of Svelte's template-region calls
-// (the raw CallsQuery is not run for scriptCallSource handlers). opts is inert for
-// call extraction today.
-func (h *svelteHandler) MarkupCalls(path string, src []byte, _ ParseOpts) []CallSite {
-	return markupExprReparse(path, preproc.ExtractSvelteMarkupExprs(src))
+// (the raw CallsQuery is not run for scriptCallSource handlers). opts.Parser is
+// honored when non-nil so callers can reuse a parser across files.
+func (h *svelteHandler) MarkupCalls(path string, src []byte, opts ParseOpts) []CallSite {
+	return markupExprReparse(path, preproc.ExtractSvelteMarkupExprs(src), opts.Parser)
 }
 
 // ScriptCalls satisfies scriptCallSource (see calls.go) for Vue (issue #409):
@@ -164,8 +163,8 @@ func (h *svelteHandler) MarkupCalls(path string, src []byte, _ ParseOpts) []Call
 // </script> into the markup. Extracting from the isolated <script> region makes the
 // leak impossible, while producing byte-identical calls to the old path on every
 // valid Vue SFC.
-func (h *vueHandler) ScriptCalls(path string, src []byte, _ ParseOpts) []CallSite {
-	return scriptRegionCalls(path, preproc.ExtractVue(src))
+func (h *vueHandler) ScriptCalls(path string, src []byte, opts ParseOpts) []CallSite {
+	return scriptRegionCalls(path, preproc.ExtractVue(src), opts.Parser)
 }
 
 // MarkupCalls satisfies markupCallSource (see calls.go) for Vue. It returns nil:
