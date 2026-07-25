@@ -777,6 +777,7 @@ func loadGithubAppConfig() forge.AppConfig {
 	appIDRaw := getenvRebrand("GITHUB_APP_ID")
 	if appIDRaw == "" {
 		// App auth not requested at all — silent by design, not a misconfiguration.
+		setCapability("github_app_auth", false)
 		return forge.AppConfig{}
 	}
 
@@ -813,6 +814,7 @@ func loadGithubAppConfig() forge.AppConfig {
 		slog.Warn("config: github app auth disabled — incomplete config; fix all listed fields (GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_KEY_PATH must all be set together)",
 			slog.String("missing", strings.Join(problems, "; ")),
 		)
+		setCapability("github_app_auth", false)
 		return forge.AppConfig{}
 	}
 
@@ -821,6 +823,7 @@ func loadGithubAppConfig() forge.AppConfig {
 		slog.Int64("installation_id", installID),
 		slog.String("key_path", keyPath),
 	)
+	setCapability("github_app_auth", true)
 	return forge.AppConfig{
 		AppID:          appID,
 		InstallationID: installID,

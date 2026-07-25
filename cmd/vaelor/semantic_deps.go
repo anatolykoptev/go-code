@@ -41,15 +41,18 @@ func newSemanticDeps(
 		slog.Warn("config: semantic_search disabled — EMBED_URL not set; set EMBED_URL to enable semantic search",
 			slog.String("env_var", "EMBED_URL"),
 		)
+		setCapability("semantic_search", false)
 		return SemanticDeps{}
 	}
 	if dataPool == nil {
+		setCapability("semantic_search", false)
 		return SemanticDeps{}
 	}
 
 	ec, err := newCodeEmbedder(cfg)
 	if err != nil {
 		slog.Warn("embed: code client disabled", slog.Any("error", err))
+		setCapability("semantic_search", false)
 		return SemanticDeps{}
 	}
 
@@ -87,6 +90,7 @@ func newSemanticDeps(
 	// Document embedding (Pipeline.Embed) always uses ec directly — never QueryClient.
 	qc := embeddings.NewQueryClient(ec, cfg.EmbedModel)
 
+	setCapability("semantic_search", true)
 	return SemanticDeps{
 		Client:       ec,
 		QueryClient:  qc,
