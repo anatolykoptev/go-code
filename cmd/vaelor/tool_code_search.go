@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/anatolykoptev/vaelor/internal/analyze"
@@ -172,32 +173,83 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 	}
 	// Progressive result-shortening ladder (#685): try the full result with
 	// context, then matches without context, then a per-file count summary.
-	// PickFitting returns the first rendering that fits DefaultBudget as
-	// `body`, plus the rung-1 (full) rendering as `full` (rendered at most
-	// once). Each rung is a complete, parseable XML envelope so the agent
-	// never receives a hard-truncated mid-document fragment. The addTool
-	// wrapper's Shape is then a no-op (the body already fits the budget).
+	// PickFitting returns the first rendering that fits the (effective) budget
+	// as `body`, the rung-1 (full) rendering as `full` (rendered at most once),
+	// and the 1-based index of the chosen rung. Each rung is a complete,
+	// parseable XML envelope so the agent never receives a hard-truncated
+	// mid-document fragment.
 	mappings := deps.PathMappings
 	ladder := mcpmeta.Ladder{
 		{Name: "full", Render: func() string { return marshalSearchXML(formatCodeSearchXML(input, matches, mappings), env) }},
 		{Name: "no-context", Render: func() string { return marshalSearchXML(formatCodeSearchXMLNoContext(input, matches, mappings), env) }},
 		{Name: "counts", Render: func() string { return marshalSearchXML(formatCodeSearchXMLSummary(input, matches, mappings), env) }},
 	}
-	body, full := mcpmeta.PickFitting(ladder, mcpmeta.DefaultBudget)
-	// Rung 0 — file-save escape hatch: when the full rendering is too large
-	// to inline (> maxInlineCharsDefault) AND outputDir is set, persist the
-	// FULL rendering to a file and append a path pointer (as an XML comment
-	// so the envelope stays well-formed) so the agent can read everything
-	// via the Read tool. This is NOT an alternative to the ladder — both
-	// hold at once: the agent gets a valid budget-fitting rendering inline
-	// AND the full result is reachable on disk. When outputDir is empty, no
-	// file is written (same as the pre-#685 largeTextResult contract).
-	if outputDir != "" && len(full) > maxInlineCharsDefault {
+	// Headroom for the file-save pointer (finding 4): when outputDir is set
+	// the pointer may be appended to `body` after PickFitting. PickFitting
+	// must therefore fit `body` within budget-reserve so body+pointer stays
+	// <= DefaultBudget — otherwise the wrapper's Shape hard-truncates the
+	// tail (the pointer, the condensation note, the meta footer), losing the
+	// file path and reintroducing the exact #685 bug at the margin. The
+	// reserve is an upper bound on the pointer length; it is only charged
+	// when outputDir is set (no file-save possible otherwise).
+	budget := mcpmeta.DefaultBudget
+	reserve := 0
+	if outputDir != "" {
+		reserve = fileSavePointerUpperBound(outputDir)
+	}
+	effectiveBudget := budget - reserve
+	if effectiveBudget < mcpmeta.MinBudget {
+		effectiveBudget = mcpmeta.MinBudget
+	}
+	body, full, rung := mcpmeta.PickFitting(ladder, effectiveBudget)
+	// File-save escape hatch (findings 4+5): persist the full rendering to a
+	// file when the ladder actually condensed (rung > 1 — a rung below the
+	// fullest was chosen, or the cut path was taken) AND outputDir is set.
+	// The gate is "the ladder condensed", NOT the old maxInlineCharsDefault
+	// (50000) threshold: the ladder condenses as soon as `full` exceeds
+	// DefaultBudget (8192), so the old gate left 8192 < len(full) <= 50000
+	// with a condensed inline body and the full result reachable NOWHERE —
+	// not inline, not on disk (finding 5). Once the ladder owns the inlining
+	// decision, that threshold is the wrong knob for this path. The agent
+	// gets a valid budget-fitting rendering inline AND the full result is
+	// reachable on disk. When outputDir is empty, no file is written (same
+	// as the pre-#685 largeTextResult contract).
+	if outputDir != "" && rung > 1 {
 		if path, ok := saveToFile(full, "code_search", outputDir); ok {
-			body += fileSavePointer(len(full), path)
+			// Defensive ceiling guard: the reserve mechanism guarantees
+			// body+pointer <= budget for any realistic outputDir. For a
+			// pathologically long outputDir (pointer alone > budget), drop
+			// the pointer rather than overflow — the file is still on disk;
+			// the body stays under budget (the ceiling invariant wins over
+			// the pointer).
+			if ptr := fileSavePointer(len(full), path); len(body)+len(ptr) <= budget {
+				body += ptr
+			}
 		}
 	}
 	return textResult(body), nil
+}
+
+// fileSavePointerUpperBound returns a safe upper bound on the byte length of
+// the pointer produced by fileSavePointer for any char count and any
+// timestamped path under outputDir. It overestimates the char-count digits
+// (int64 max = 19 digits) and the timestamp digits (int64 max = 19 digits)
+// so the caller can reserve headroom BEFORE PickFitting and guarantee
+// body+pointer <= DefaultBudget (finding 4). The bound is computed from the
+// format string itself, not hand-counted, so it stays correct if the format
+// changes.
+func fileSavePointerUpperBound(outputDir string) int {
+	const maxDigits = 20 // covers int64 max (19 digits) + 1 safety
+	// Filename: "code_search_<millis>.txt" — millis is int64, bounded by maxDigits.
+	maxFilename := "code_search_" + strings.Repeat("9", maxDigits) + ".txt"
+	// filepath.Join can only shorten (collapsing slashes/trailing separators),
+	// so len(outputDir)+1+len(maxFilename) is a safe upper bound on the joined path.
+	maxPathLen := len(outputDir) + 1 + len(maxFilename)
+	// Build the pointer with max-length fields and measure its byte length.
+	// The em-dash and other non-ASCII chars are multi-byte in UTF-8; len()
+	// counts bytes, matching len(body) and DefaultBudget (both byte measures).
+	return len(fmt.Sprintf("\n\n<!-- full-result: %s chars saved to: %s — Use Read tool to access the file. -->",
+		strings.Repeat("9", maxDigits), strings.Repeat("x", maxPathLen)))
 }
 
 // fileSavePointer builds the XML-comment pointer appended to the inline body

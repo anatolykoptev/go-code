@@ -208,22 +208,30 @@ type Ladder []Rung
 
 // PickFitting walks the ladder in order and returns the FIRST rendering that
 // fits within budget (bytes) as `body`, plus the rung-1 (fullest) rendering
-// as `full`. Rungs after the first carry a condensation note naming the
-// chosen rung, so the agent knows the result was condensed. Laziness: a
-// rung's Render closure is only invoked when that rung is reached — rungs
-// past the chosen one are never rendered. Rung 1 is always rendered (it is
-// the first iteration) and is returned as `full` so the caller can persist
-// it to a file without re-rendering — the expensive full rendering is
-// produced AT MOST ONCE per call.
+// as `full`, plus `rung` — the 1-based index of the chosen rung. Rungs after
+// the first carry a condensation note naming the chosen rung, so the agent
+// knows the result was condensed. Laziness: a rung's Render closure is only
+// invoked when that rung is reached — rungs past the chosen one are never
+// rendered. Rung 1 is always rendered (it is the first iteration) and is
+// returned as `full` so the caller can persist it to a file without
+// re-rendering — the expensive full rendering is produced AT MOST ONCE per
+// call.
+//
+// `rung` lets the caller detect condensation: rung == 1 means the full
+// rendering fit inline (body == full, nothing was condensed); rung > 1 means
+// a cheaper rung was chosen (the full rendering is available as `full` for
+// the caller to persist to a file). On the cut path (no rung fit), rung is
+// the last (cheapest) rung's index — still > 1 for any multi-rung ladder, so
+// the condensation signal is correct.
 //
 // If NO rung fits (even the cheapest), the cheapest rendering is truncated
 // to fit and an explicit cut marker is appended. This is the last-resort
 // branch, not the normal one; the marker is honest about the cut.
 //
-// An empty ladder or budget <= 0 yields ("", "").
-func PickFitting(l Ladder, budget int) (body, full string) {
+// An empty ladder or budget <= 0 yields ("", "", 0).
+func PickFitting(l Ladder, budget int) (body, full string, rung int) {
 	if len(l) == 0 || budget <= 0 {
-		return "", ""
+		return "", "", 0
 	}
 	n := len(l)
 	// Rung 1 is always rendered first — capture it as `full` for the caller
@@ -245,7 +253,7 @@ func PickFitting(l Ladder, budget int) (body, full string) {
 			text += condensationNote(i+1, n, rung.Name)
 		}
 		if len(text) <= budget {
-			return text, full
+			return text, full, i + 1
 		}
 	}
 	// No rung fits — truncate the cheapest (last) raw rendering and emit an
@@ -264,7 +272,7 @@ func PickFitting(l Ladder, budget int) (body, full string) {
 	if cut > len(lastRaw) {
 		cut = len(lastRaw)
 	}
-	return lastRaw[:cut] + marker, full
+	return lastRaw[:cut] + marker, full, n
 }
 
 // condensationNote builds the marker appended to rungs below the first.
