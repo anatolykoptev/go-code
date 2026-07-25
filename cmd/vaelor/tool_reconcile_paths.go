@@ -31,6 +31,7 @@ type ReconcilePathsInput struct {
 // orphanSweepStore.
 type reconcilePathsStore interface {
 	ListRepoKeysWithSourcePath(ctx context.Context) ([]embeddings.RepoKeySourcePath, error)
+	ListRepoKeysWithoutSourcePath(ctx context.Context) ([]embeddings.RepoKeySourcePath, error)
 	ReconcileRepoPaths(ctx context.Context, repoKey, sourcePath string, dryRun bool) (*embeddings.ReconcileResult, error)
 }
 
@@ -73,8 +74,12 @@ func registerReconcilePaths(server *mcp.Server, deps SemanticDeps) {
 // Dry-run defaulting: dry := in.DryRun == nil || *in.DryRun — nil or true ⇒
 // preview (safe default); false ⇒ real delete. Mirrors handleOrphanSweep.
 //
-// Iterates every repo with a non-empty source_path. For each, calls
-// ReconcileRepoPaths (which contains the root-missing guard). Aggregates the
+// Iterates every repo with a non-empty source_path (reconcilable), then every
+// pathless key (source_path IS NULL OR ”) so each one takes the
+// source_path_empty skip branch and sets
+// gocode_index_stale_path_unmeasured{reason="source_path_empty"}=1 (#714).
+// Pathless keys cannot be reconciled — root-based existence checks need a
+// root — but they must stop reporting a false-clean ratio=0. Aggregates the
 // results into a single text report.
 func handleReconcilePaths(ctx context.Context, in ReconcilePathsInput, store reconcilePathsStore) (*mcp.CallToolResult, error) {
 	slog.Info("reconcile_paths: starting")
@@ -83,6 +88,10 @@ func handleReconcilePaths(ctx context.Context, in ReconcilePathsInput, store rec
 	repos, err := store.ListRepoKeysWithSourcePath(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile_paths: list repos: %w", err)
+	}
+	pathless, err := store.ListRepoKeysWithoutSourcePath(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile_paths: list pathless repos: %w", err)
 	}
 
 	var (
@@ -111,6 +120,19 @@ func handleReconcilePaths(ctx context.Context, in ReconcilePathsInput, store rec
 			totalDel += res.Deleted
 			fmt.Fprintf(&b, "repo=%s DELETED stale_paths=%d rows_deleted=%d total_rows=%d\n",
 				res.RepoKey, res.StalePaths, res.Deleted, res.TotalRows)
+		}
+	}
+	// #714: walk pathless keys so each takes the source_path_empty skip
+	// branch and stops reporting a false-clean ratio=0. Reconciliation
+	// genuinely cannot run for them — this is correct and expected.
+	for _, r := range pathless {
+		res, rErr := store.ReconcileRepoPaths(ctx, r.RepoKey, "", dry)
+		if rErr != nil {
+			return nil, fmt.Errorf("reconcile_paths: pathless repo %s: %w", r.RepoKey, rErr)
+		}
+		if res.Skipped {
+			skipped++
+			fmt.Fprintf(&b, "repo=%s SKIPPED (%s) total_rows=%d\n", res.RepoKey, res.SkipReason, res.TotalRows)
 		}
 	}
 

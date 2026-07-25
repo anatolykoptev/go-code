@@ -195,6 +195,36 @@ func (s *Store) ListRepoKeysWithSourcePath(ctx context.Context) ([]RepoKeySource
 	return result, rows.Err()
 }
 
+// ListRepoKeysWithoutSourcePath returns every (repo_key, source_path) from
+// code_repo_state where source_path is NULL or empty. Used by the
+// reconcile_paths MCP tool to enumerate pathless keys (#714) so each one
+// takes the source_path_empty skip branch and sets
+// gocode_index_stale_path_unmeasured{reason="source_path_empty"}=1 instead
+// of reporting a false-clean ratio=0. Reconciliation genuinely cannot run
+// for them — root-based existence checks need a root — so they are skipped,
+// not reconciled.
+func (s *Store) ListRepoKeysWithoutSourcePath(ctx context.Context) ([]RepoKeySourcePath, error) {
+	if err := s.EnsureSchema(ctx); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT repo_key, source_path FROM public.code_repo_state WHERE source_path IS NULL OR source_path = ''`)
+	if err != nil {
+		return nil, fmt.Errorf("ListRepoKeysWithoutSourcePath: %w", err)
+	}
+	defer rows.Close()
+
+	var result []RepoKeySourcePath
+	for rows.Next() {
+		var r RepoKeySourcePath
+		if err := rows.Scan(&r.RepoKey, &r.SourcePath); err != nil {
+			return nil, fmt.Errorf("ListRepoKeysWithoutSourcePath: scan: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
 // CheckStalePaths returns the file_paths in counts that do NOT resolve under
 // root, plus the total row count under those paths. If root itself does not
 // exist (os.Stat fails), returns ok=false — the caller MUST delete nothing.

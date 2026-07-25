@@ -56,6 +56,34 @@ func (s *Store) GetRepoState(ctx context.Context, repoKey string) (string, error
 	return sha, nil
 }
 
+// GetRepoSourcePath returns the source_path recorded in code_repo_state for
+// repoKey, or "" when no row exists or on any error. Used by the index-pass
+// reconciliation hook to resolve the root from STATE rather than the caller's
+// root argument — so a pathless key (empty source_path) takes the
+// source_path_empty skip branch instead of being reconciled against an
+// unrecorded root (#714).
+//
+// Mirrors GetRepoState's error-collapsing convention: a missing row returns
+// ("", nil) so the caller treats it as "pathless / first index" and lets
+// ReconcileRepoPaths take the skip branch. A real lookup error returns ("",
+// err) so the caller can log and skip.
+func (s *Store) GetRepoSourcePath(ctx context.Context, repoKey string) (string, error) {
+	if err := s.EnsureSchema(ctx); err != nil {
+		return "", err
+	}
+	var sourcePath string
+	err := s.pool.QueryRow(ctx,
+		`SELECT source_path FROM public.code_repo_state WHERE repo_key = $1`, repoKey).
+		Scan(&sourcePath)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	return sourcePath, nil
+}
+
 // RepoStateExists reports whether a code_repo_state row exists for repoKey.
 // GetRepoState collapses "no row", "row with empty head_sha" (non-git repo)
 // and "lookup error" all to "" — none distinguishable by the caller. The
@@ -119,6 +147,53 @@ func (s *Store) SetRepoStateWithPath(ctx context.Context, repoKey, sha, model, s
 		         embed_model = EXCLUDED.embed_model,
 		         source_path = EXCLUDED.source_path`,
 		repoKey, sha, model, sourcePath)
+	return err
+}
+
+// BackfillRepoSourcePath sets source_path for repoKey ONLY when a row already
+// exists AND its current source_path is empty (NULL or empty string). Used by
+// the index-pass reconciliation hook (#714 round 2) to self-heal pathless
+// keys: when a pathless key (state row present, source_path empty) is indexed
+// with a non-empty root (provably corresponding to the key by FNV
+// construction — every call site computes repoKey = FNV-32a(root)), the root
+// is backfilled so the key stops being pathless and becomes reconcilable on
+// subsequent passes without needing the root fallback.
+//
+// Does NOT INSERT a new row — only UPDATEs an existing one. This is critical
+// for the first-index compensate-orphan guard: compensateFirstIndexOrphan
+// (pipeline.go) checks RepoStateExists and skips the rollback when a state
+// row is present. If the backfill INSERTed a row on a first index, that row
+// would defeat the guard and leave partial embeddings un-rolled-back on an
+// embedChunks failure (orphan). By updating only, a first index (no row) is
+// a no-op: writeRepoState creates the row with source_path=root on success,
+// and the compensate path still works when embedChunks fails.
+//
+// Safety:
+//   - Never clobbers a non-empty source_path: the WHERE clause
+//     (source_path IS NULL OR source_path = ”) ensures a concurrent indexer
+//     that already wrote a real source_path wins and our update is a no-op.
+//   - Does NOT touch head_sha, embed_model, or indexed_at: only source_path
+//     is SET, so a pre-existing row's SHA/model survive.
+//
+// Ordering vs writeRepoState: the backfill runs in the reconcile hook (before
+// embedChunks and before writeRepoState). Both write source_path = root, so
+// there is no contradiction. If writeRepoState later fails, the backfilled
+// row has source_path set but a stale head_sha — the same state as a
+// swallowed writeRepoState failure on a re-index (existing behavior, not an
+// orphan).
+func (s *Store) BackfillRepoSourcePath(ctx context.Context, repoKey, sourcePath string) error {
+	if sourcePath == "" {
+		return nil
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE public.code_repo_state
+		     SET source_path = $2
+		     WHERE repo_key = $1
+		       AND (source_path IS NULL OR source_path = '')`,
+		repoKey, sourcePath)
 	return err
 }
 

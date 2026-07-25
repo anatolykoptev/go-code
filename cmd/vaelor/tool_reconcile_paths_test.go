@@ -13,6 +13,7 @@ import (
 	"github.com/anatolykoptev/vaelor/internal/argnorm"
 	"github.com/anatolykoptev/vaelor/internal/embeddings"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,6 +37,8 @@ func TestReconcilePathsInput_NonEmptyClosedSchema(t *testing.T) {
 type fakeReconcileStore struct {
 	repos            []embeddings.RepoKeySourcePath
 	reposErr         error
+	pathlessRepos    []embeddings.RepoKeySourcePath
+	pathlessReposErr error
 	reconcileCalls   int
 	reconcileResult  *embeddings.ReconcileResult
 	reconcileErr     error
@@ -44,6 +47,10 @@ type fakeReconcileStore struct {
 
 func (f *fakeReconcileStore) ListRepoKeysWithSourcePath(ctx context.Context) ([]embeddings.RepoKeySourcePath, error) {
 	return f.repos, f.reposErr
+}
+
+func (f *fakeReconcileStore) ListRepoKeysWithoutSourcePath(ctx context.Context) ([]embeddings.RepoKeySourcePath, error) {
+	return f.pathlessRepos, f.pathlessReposErr
 }
 
 func (f *fakeReconcileStore) ReconcileRepoPaths(ctx context.Context, repoKey, sourcePath string, dryRun bool) (*embeddings.ReconcileResult, error) {
@@ -302,4 +309,125 @@ func insertReconcileSymbols(t *testing.T, store *embeddings.Store, repoKey, file
 // makeReconcileVec returns a zero vector of the right dimension for the test DB.
 func makeReconcileVec() []float32 {
 	return make([]float32, 768) // code-rank-embed dimension
+}
+
+// -- #714: pathless keys must be enumerated by the tool, not just direct-called --
+
+// TestHandleReconcilePaths_PathlessKeyReachedViaEnumeration is test 2 from the
+// task: a pathless key (source_path = ”) reached through the TOOL's
+// enumeration ⇒ lands on the skip branch, unmeasured{reason="source_path_empty"}=1,
+// nothing deleted.
+//
+// CRITICAL anti-vacuity: a test that calls ReconcileRepoPaths("") directly
+// passes today and proves nothing about reachability. This test goes through
+// the enumeration (ListRepoKeysWithoutSourcePath → handleReconcilePaths →
+// ReconcileRepoPaths) so it exercises the REAL production path.
+//
+// Falsifiable: revert the tool to non-empty-only enumeration (remove the
+// ListRepoKeysWithoutSourcePath walk) ⇒ the pathless repo is never iterated,
+// ReconcileRepoPaths is never called for it, unmeasured gauge stays at 0 ⇒
+// assert.Equal(1, ...) on the unmeasured gauge REDS.
+//
+// Uses a real *embeddings.Store so the gauge is actually set. DB-gated.
+func TestHandleReconcilePaths_PathlessKeyReachedViaEnumeration(t *testing.T) {
+	dsn := os.Getenv("PR_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set PR_TEST_DATABASE_URL to run the pathless enumeration test")
+	}
+	cfg, parseErr := pgxpool.ParseConfig(dsn)
+	if parseErr != nil {
+		t.Fatalf("parse PR_TEST_DATABASE_URL: %v", parseErr)
+	}
+	if strings.EqualFold(cfg.ConnConfig.Database, "gocode") {
+		t.Fatalf("refusing to run against the prod gocode DB")
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	store := embeddings.NewStore(pool)
+	ctx := context.Background()
+	require.NoError(t, store.EnsureSchema(ctx))
+
+	// Seed a pathless key: state row with source_path='', plus embeddings.
+	const pathlessRepo = "test/tool-pathless-enumerated"
+	cleanReconcileRepo(t, store, pathlessRepo)
+	// Also clean the state row (cleanReconcileRepo only deletes embeddings).
+	_, _ = pool.Exec(ctx, `DELETE FROM public.code_repo_state WHERE repo_key = $1`, pathlessRepo)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM public.code_repo_state WHERE repo_key = $1`, pathlessRepo)
+	})
+
+	insertReconcileSymbols(t, store, pathlessRepo, "pkg/agent/main.go", []string{"X", "Y"})
+	// State row with empty source_path — the pathless tombstone shape.
+	require.NoError(t, store.SetRepoStateWithPath(ctx, pathlessRepo, "deadbeef", "test-model", ""))
+
+	// Verify the key IS enumerated by ListRepoKeysWithoutSourcePath — this is
+	// the reachability gate. If the query is wrong, the test fails here.
+	pathless, listErr := store.ListRepoKeysWithoutSourcePath(ctx)
+	require.NoError(t, listErr)
+	var found bool
+	for _, r := range pathless {
+		if r.RepoKey == pathlessRepo {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "pathless key must be enumerated by ListRepoKeysWithoutSourcePath")
+
+	// Reset the unmeasured gauge for this repo to 0 (simulating boot warm-up).
+	embeddings.SetStalePathUnmeasuredGauge(pathlessRepo, "source_path_empty", 0)
+
+	// Run the tool handler with dry-run=true (default). The handler must walk
+	// the pathless repos and call ReconcileRepoPaths for each, landing on the
+	// source_path_empty skip branch.
+	res, err := handleReconcilePaths(ctx, ReconcilePathsInput{}, store)
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+
+	text := textContentOf(t, res)
+	assert.Contains(t, text, pathlessRepo, "pathless key must appear in the report")
+	assert.Contains(t, text, "source_path_empty",
+		"pathless key must be reported as skipped with source_path_empty reason")
+
+	// The unmeasured gauge MUST be 1 with reason="source_path_empty".
+	// This is the core assertion: the pathless key stops reporting clean.
+	unmeasured := gaugeReconcileValue(t, pathlessRepo, "source_path_empty")
+	assert.Equal(t, 1.0, unmeasured,
+		"unmeasured{reason=source_path_empty} must be 1 after tool enumeration — "+
+			"if 0, the tool did not walk pathless keys (#714)")
+
+	// Nothing deleted — the skip branch deletes nothing.
+	rows, err := store.GetSymbolsForFile(ctx, pathlessRepo, "pkg/agent/main.go")
+	require.NoError(t, err)
+	assert.Len(t, rows, 2, "pathless key rows must survive — skip branch deletes nothing")
+}
+
+// gaugeReconcileValue reads a stale-path unmeasured gauge value for a test.
+func gaugeReconcileValue(t *testing.T, repo, reason string) float64 {
+	t.Helper()
+	// Gather from the default Prometheus registry (the gauge is registered
+	// via promauto in the embeddings package, so it lives on the default
+	// registry). Filter by name + label pair.
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "gocode_index_stale_path_unmeasured" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			repoOK, reasonOK := false, false
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "repo" && l.GetValue() == repo {
+					repoOK = true
+				}
+				if l.GetName() == "reason" && l.GetValue() == reason {
+					reasonOK = true
+				}
+			}
+			if repoOK && reasonOK {
+				return m.GetGauge().GetValue()
+			}
+		}
+	}
+	return 0 // not found — treated as 0 (the warmed default)
 }
