@@ -95,7 +95,10 @@ func TestIncrementalSync_SameSHA_FastPathReconcileFires(t *testing.T) {
 // TestIncrementalSync_SameSHA_FastPathReconcileDryRunPreservesRows is test 2:
 // seed a file_path row that does not exist on disk, assert the row count is
 // UNCHANGED after IncrementalSync (proves dry-run — DeleteRowsByFilePaths is
-// unreachable from any same-SHA fast path).
+// unreachable from the IncrementalSync same-SHA fast path; the IndexRepo
+// same-SHA fast path is covered separately by
+// TestFastPath_DryRunReconcile_UpdatesGaugeAndDeletesNothing in
+// reconcile_paths_fastpath_test.go).
 //
 // DB-gated: needs a real store + embed server.
 func TestIncrementalSync_SameSHA_FastPathReconcileDryRunPreservesRows(t *testing.T) {
@@ -134,7 +137,8 @@ func TestIncrementalSync_SameSHA_FastPathReconcileDryRunPreservesRows(t *testing
 	assert.Len(t, postRows, 2,
 		"same-SHA fast-path dry-run must NOT delete stale rows — "+
 			"if 0, dryRun was false (real delete): DeleteRowsByFilePaths must be "+
-			"unreachable from any same-SHA fast path")
+			"unreachable from the IncrementalSync same-SHA fast path (the IndexRepo "+
+			"path is guarded by TestFastPath_DryRunReconcile_UpdatesGaugeAndDeletesNothing)")
 }
 
 // TestIncrementalSync_SameSHA_FastPathBackfillPathlessKey is test 3: for a
