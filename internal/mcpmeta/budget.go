@@ -166,3 +166,124 @@ func ResolveBudget(override, defaultBudget int) int {
 	}
 	return override
 }
+
+// condensationNotePrefix is the sentinel prefix of the marker appended to
+// every rung below the first (full) one returned by PickFitting. It tells
+// the agent the result was condensed and by which rung, so it can narrow its
+// query instead of assuming it saw everything. A silently-shortened result
+// is the same failure class as the hard truncation this ladder replaces.
+//
+// The marker is an XML comment (<!-- ... -->) so it survives a strict XML
+// parse — trailing character data after the root element is rejected by
+// strict parsers even though Go's encoding/xml tolerates it. This mirrors
+// the appendMetaFooter precedent (<!-- meta: ... -->).
+const condensationNotePrefix = "<!-- condensed:"
+
+// cutMarkerPrefix is the sentinel prefix of the last-resort marker emitted
+// by PickFitting when even the cheapest rung does not fit the budget. The
+// cheapest rendering is then truncated and this marker is appended so the
+// consumer knows the result was cut — this is the honest fallback, not the
+// normal path. XML comment shape for strict-parse survival (see
+// condensationNotePrefix). The cut path truncates mid-document by design,
+// so well-formedness is impossible there — only the marker's shape is kept
+// consistent.
+const cutMarkerPrefix = "<!-- cut:"
+
+// Rung is one progressively cheaper rendering in a Ladder. Render is a
+// closure that produces the full rendered string for this rung; it is only
+// invoked when PickFitting reaches this rung (laziness is load-bearing — an
+// expensive rendering is never computed unless it is actually reached).
+type Rung struct {
+	Name   string
+	Render func() string
+}
+
+// Ladder is an ordered list of rungs, most expensive (fullest) first. The
+// cheapest (last) rung is the last-resort fallback when no rung fits. Each
+// rung's Render closure MUST produce a self-consistent, parseable document
+// on its own — PickFitting never returns a partial document on the normal
+// path (the only exception is the last-resort truncation of the cheapest
+// rung, which is explicitly marked with cutMarkerPrefix).
+type Ladder []Rung
+
+// PickFitting walks the ladder in order and returns the FIRST rendering that
+// fits within budget (bytes) as `body`, plus the rung-1 (fullest) rendering
+// as `full`, plus `rung` — the 1-based index of the chosen rung. Rungs after
+// the first carry a condensation note naming the chosen rung, so the agent
+// knows the result was condensed. Laziness: a rung's Render closure is only
+// invoked when that rung is reached — rungs past the chosen one are never
+// rendered. Rung 1 is always rendered (it is the first iteration) and is
+// returned as `full` so the caller can persist it to a file without
+// re-rendering — the expensive full rendering is produced AT MOST ONCE per
+// call.
+//
+// `rung` lets the caller detect condensation: rung == 1 means the full
+// rendering fit inline (body == full, nothing was condensed); rung > 1 means
+// a cheaper rung was chosen (the full rendering is available as `full` for
+// the caller to persist to a file). On the cut path (no rung fit), rung is
+// the last (cheapest) rung's index — still > 1 for any multi-rung ladder, so
+// the condensation signal is correct.
+//
+// If NO rung fits (even the cheapest), the cheapest rendering is truncated
+// to fit and an explicit cut marker is appended. This is the last-resort
+// branch, not the normal one; the marker is honest about the cut.
+//
+// An empty ladder or budget <= 0 yields ("", "", 0).
+func PickFitting(l Ladder, budget int) (body, full string, rung int) {
+	if len(l) == 0 || budget <= 0 {
+		return "", "", 0
+	}
+	n := len(l)
+	// Rung 1 is always rendered first — capture it as `full` for the caller
+	// so the file-save path never re-renders it (at-most-once guarantee).
+	full = l[0].Render()
+	var lastRaw string
+	for i, rung := range l {
+		var raw string
+		if i == 0 {
+			raw = full // reuse the already-rendered rung 1
+		} else {
+			raw = rung.Render()
+		}
+		if i == n-1 {
+			lastRaw = raw
+		}
+		text := raw
+		if i > 0 {
+			text += condensationNote(i+1, n, rung.Name)
+		}
+		if len(text) <= budget {
+			return text, full, i + 1
+		}
+	}
+	// No rung fits — truncate the cheapest (last) raw rendering and emit an
+	// explicit cut marker so the consumer knows the result was cut.
+	name := l[n-1].Name
+	marker := cutMarker(budget, n, name)
+	// If the full marker itself exceeds the budget (absurdly small budget),
+	// fall back to the minimal honest signal so the result still fits.
+	if len(marker) >= budget {
+		marker = cutMarkerPrefix + " -->"
+	}
+	cut := budget - len(marker)
+	if cut < 0 {
+		cut = 0
+	}
+	if cut > len(lastRaw) {
+		cut = len(lastRaw)
+	}
+	return lastRaw[:cut] + marker, full, n
+}
+
+// condensationNote builds the marker appended to rungs below the first.
+// Format: <!-- condensed: rung <i>/<n> — <name> -->
+func condensationNote(i, n int, name string) string {
+	return fmt.Sprintf("%s rung %d/%d — %s -->", condensationNotePrefix, i, n, name)
+}
+
+// cutMarker builds the last-resort marker. Format:
+// <!-- cut: result truncated at <budget> bytes — even rung <n>/<n> (<name>) did not fit -->
+func cutMarker(budget, n int, name string) string {
+	return fmt.Sprintf("%s result truncated at %d bytes — even rung %d/%d (%s) did not fit -->",
+		cutMarkerPrefix, budget, n, n, name)
+}
