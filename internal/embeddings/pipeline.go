@@ -419,6 +419,23 @@ func (p *Pipeline) checkSameSHAFastPath(ctx context.Context, repoKey, root, curr
 	case embCount > 0:
 		slog.Debug("indexRepo: skip — main branch unchanged",
 			slog.String("repo", repoKey), slog.String("sha", shortSHA(currentSHA)))
+		// #711 + #714: dry-run path-existence reconciliation on the fast
+		// path. The gauge is process-local and warmed to 0 at boot, so
+		// without this a dormant contaminated repo (SHA unchanged, stale
+		// paths present) reads ratio=0 — verified-clean — after every
+		// restart. The dry-run refreshes gocode_index_stale_path_ratio
+		// from the source_path recorded in code_repo_state and deletes
+		// NOTHING. The existing post-parse DELETING reconciliation stays
+		// where it is, still gated by the shrink guard (#710 invariant).
+		//
+		// Dry-run is safe by construction: ReconcileRepoPaths(dryRun=true)
+		// returns before the DELETE statement. No new safety argument
+		// needed, no second threshold, no shrink-guard interaction.
+		//
+		// Cost: one GROUP BY (ListFilePathCounts, indexed by repo_key) +
+		// one os.Stat per distinct file_path (~1000 for the largest repo).
+		// Measured: see TestFastPath_DryRunReconcile_Latency.
+		p.runFastPathDryRunReconcile(ctx, repoKey)
 		if setErr := p.writeRepoState(ctx, repoKey, currentSHA, root); setErr != nil {
 			recordRepoStateWriteFailure(repoKey, "indexRepo:same-sha", setErr)
 		}
@@ -439,6 +456,34 @@ func (p *Pipeline) checkSameSHAFastPath(ctx context.Context, repoKey, root, curr
 		slog.Warn("indexRepo: same SHA but 0 embeddings — recovery re-index",
 			slog.String("repo", repoKey), slog.String("sha", shortSHA(currentSHA)))
 		return nil, false
+	}
+}
+
+// runFastPathDryRunReconcile runs a DRY-RUN path-existence reconciliation
+// for repoKey using the source_path recorded in code_repo_state. Called on
+// the same-SHA fast path so the gauge survives restarts (#711).
+//
+// Dry-run deletes nothing — ReconcileRepoPaths(dryRun=true) returns before
+// the DELETE statement. The source_path is resolved from STATE (not the
+// caller's root) so a pathless key (empty source_path) takes the
+// source_path_empty skip branch and sets unmeasured{reason="source_path_empty"}=1
+// instead of being reconciled against an unrecorded root (#714).
+//
+// Non-fatal: a lookup or reconciliation error is logged and swallowed so it
+// never blocks the fast path.
+func (p *Pipeline) runFastPathDryRunReconcile(ctx context.Context, repoKey string) {
+	if p.reconcilePaths == nil {
+		return
+	}
+	sourcePath, spErr := p.store.GetRepoSourcePath(ctx, repoKey)
+	if spErr != nil {
+		slog.Warn("indexRepo: fast-path source_path lookup failed (non-fatal)",
+			slog.String("repo", repoKey), slog.Any("error", spErr))
+		return
+	}
+	if _, rErr := p.reconcilePaths(ctx, repoKey, sourcePath, true); rErr != nil {
+		slog.Warn("indexRepo: fast-path dry-run reconciliation failed (non-fatal)",
+			slog.String("repo", repoKey), slog.Any("error", rErr))
 	}
 }
 
@@ -567,6 +612,14 @@ func (p *Pipeline) indexRepoWithTool(
 	// project sharing the same repo_key (the FNV(path) rename collision at
 	// the heart of #708).
 	//
+	// #714: the root is resolved from code_repo_state.source_path, NOT the
+	// caller's root argument. A key whose stored source_path is empty takes
+	// the source_path_empty skip branch inside ReconcileRepoPaths instead of
+	// being reconciled against an unrecorded root — the caller's root may
+	// belong to a different project, and judging a pathless key's rows
+	// against it is a latent data-loss path (rows judged stale against a
+	// root they were never indexed from get deleted).
+	//
 	// Non-fatal: a reconciliation error is logged and swallowed so it never
 	// blocks indexing. The root-missing guard inside ReconcileRepoPaths
 	// ensures a mount blip deletes nothing.
@@ -574,9 +627,14 @@ func (p *Pipeline) indexRepoWithTool(
 	// Does NOT run on the same-SHA fast path (above): a fast-path skip means
 	// the repo hasn't changed since the last successful index, so no stale
 	// paths can have appeared. A full-walk index (SHA changed or non-git) is
-	// where renames surface.
-	if p.reconcilePaths != nil && root != "" && !shrinkGuardFires(seen, existing) {
-		if _, rErr := p.reconcilePaths(ctx, repoKey, root, false); rErr != nil {
+	// where renames surface. The fast-path DRY-RUN reconciliation
+	// (runFastPathDryRunReconcile, above) covers the gauge-refresh case.
+	if p.reconcilePaths != nil && !shrinkGuardFires(seen, existing) {
+		sourcePath, spErr := p.store.GetRepoSourcePath(ctx, repoKey)
+		if spErr != nil {
+			slog.Warn("indexRepo: source_path lookup failed (non-fatal)",
+				slog.String("repo", repoKey), slog.Any("error", spErr))
+		} else if _, rErr := p.reconcilePaths(ctx, repoKey, sourcePath, false); rErr != nil {
 			slog.Warn("indexRepo: path reconciliation failed (non-fatal)",
 				slog.String("repo", repoKey), slog.Any("error", rErr))
 		}

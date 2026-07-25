@@ -17,24 +17,35 @@ import (
 // delete. It does NOT run on the same-SHA fast path — a fast-path skip means
 // the repo hasn't changed, so no stale paths can have appeared.
 //
+// #714: the hook now resolves source_path from code_repo_state (not the
+// caller's root), so the test seeds a state row with source_path=dir before
+// the index. A pathless key (empty source_path) would take the skip branch
+// instead — covered by TestHandleReconcilePaths_PathlessKeyReachedViaEnumeration.
+//
 // DB-gated: needs a real store to reach the post-parse hook.
 //
-// Falsifiable: remove the `if p.reconcilePaths != nil && root != ""` block
-// from indexRepoWithTool → reconcileCalls stays 0 → assert.Equal(1, ...) fails.
+// Falsifiable: remove the `if p.reconcilePaths != nil && !shrinkGuardFires`
+// block from indexRepoWithTool → reconcileCalls stays 0 → assert.Equal(1, ...) fails.
 func TestIndexRepoWithTool_CallsReconcilePaths(t *testing.T) {
 	p, store := testPipeline(t)
 	ctx := context.Background()
 	const repo = "test/reconcile-hook-called"
-	cleanRepo(t, store, repo)
+	cleanRepoFull(t, store, repo)
 
 	dir := t.TempDir()
 	writeTempGoFile(t, dir, "main.go", []string{"FuncA"})
+
+	// Seed a prior state row with source_path=dir so the hook resolves the
+	// root from state (#714). Use a SHA that won't match any real git ref
+	// (dir is not a git repo) so the fast path is skipped and the full walk
+	// runs, reaching the post-parse hook.
+	require.NoError(t, store.SetRepoStateWithPath(ctx, repo, "prior-sha-not-matching", "test-model", dir))
 
 	var reconcileCalls int32
 	p.reconcilePaths = func(ctx context.Context, repoKey, sourcePath string, dryRun bool) (*ReconcileResult, error) {
 		atomic.AddInt32(&reconcileCalls, 1)
 		assert.Equal(t, repo, repoKey, "hook must receive the repoKey")
-		assert.Equal(t, dir, sourcePath, "hook must receive the root path")
+		assert.Equal(t, dir, sourcePath, "hook must receive the source_path from state")
 		assert.False(t, dryRun, "index-pass hook must call with dryRun=false (real delete)")
 		return &ReconcileResult{RepoKey: repoKey}, nil
 	}
