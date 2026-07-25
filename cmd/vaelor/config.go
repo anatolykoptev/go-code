@@ -227,6 +227,21 @@ type Config struct {
 	// truncation". rrfK=60 is unchanged. Tune via RRF_RANK_WINDOW env.
 	RRFRankWindow int
 
+	// RRFGraphStalenessThresholdS is the staleness threshold (seconds) for the
+	// retrieval path's AGE-graph freshness gate (#691). A graph older than this
+	// triggers self-heal + a degradation marker, and (when RRFDropStaleGraphArms
+	// is true) drops the graph+hotspot arms. Default 1800 (30 min). 0 = use the
+	// default. Env: RRF_GRAPH_STALENESS_THRESHOLD_S.
+	RRFGraphStalenessThresholdS int
+
+	// RRFDropStaleGraphArms is the dark-launch kill switch for the drop-and-
+	// renormalise sub-change (#691 C). When true, a stale graph causes the
+	// graph+hotspot RRF arms to be zeroed and the remaining weights
+	// renormalised instead of fusing stale hits. Default false — changes
+	// ranking and needs A/B measurement before going live. Env:
+	// RRF_DROP_STALE_GRAPH_ARMS.
+	RRFDropStaleGraphArms bool
+
 	// KeywordArm selects the lexical retriever that feeds the Keyword slot of
 	// MergeRRF. Allowed values: "bm25f" (default, BM25F over trigram-prefiltered
 	// candidates, BM25F P4) | "grep" (byte-identical to the legacy lexical arm).
@@ -614,26 +629,28 @@ func loadConfig() (Config, error) {
 		AnalyzeRankWeightPageRank: wPR,
 		AnalyzeRankWeightSeed:     wSeed,
 
-		RRFWeightSemantic:      wSemantic,
-		RRFWeightKeyword:       wKeyword,
-		RRFWeightSparse:        wSparse,
-		RRFWeightGraph:         wGraph,
-		RRFWeightHotspot:       wHotspot,
-		RRFWeightRecency:       wRecency,
-		RRFRankWindow:          env.Int("RRF_RANK_WINDOW", defaultRRFRankWindow),
-		KeywordArm:             parseKeywordArm(env.Str("KEYWORD_ARM", defaultKeywordArm)),
-		SparseEmbedURL:         env.Str("SPARSE_EMBED_URL", ""),
-		SparseEmbedModel:       env.Str("SPARSE_EMBED_MODEL", defaultSparseEmbedModel),
-		SparseEmbedMaxArray:    env.Int("SPARSE_EMBED_MAX_ARRAY", defaultSparseEmbedMaxArray),
-		SparseBackfillDeadline: clampSparseBackfillDeadline(env.Int("SPARSE_BACKFILL_DEADLINE_S", defaultSparseBackfillDeadlineS)),
-		PrometheusURL:          env.Str("PROMETHEUS_URL", ""),
-		DozorURL:               env.Str("DOZOR_URL", "http://dozor:8765"),
-		DozorAPIToken:          env.Str("DOZOR_API_TOKEN", ""),
-		JaegerURL:              env.Str("JAEGER_URL", ""),
-		SourcemapAllowedHosts:  env.List("SOURCEMAP_ALLOWED_HOSTS", ""),
-		SourcemapMaxBodyBytes:  env.Int("SOURCEMAP_MAX_BODY_BYTES", defaultSourcemapMaxBodyBytes),
-		SourcemapRateLimit:     env.Float("SOURCEMAP_RATE_LIMIT", defaultSourcemapRateLimit),
-		SourcemapRateBurst:     env.Int("SOURCEMAP_RATE_BURST", defaultSourcemapRateBurst),
+		RRFWeightSemantic:           wSemantic,
+		RRFWeightKeyword:            wKeyword,
+		RRFWeightSparse:             wSparse,
+		RRFWeightGraph:              wGraph,
+		RRFWeightHotspot:            wHotspot,
+		RRFWeightRecency:            wRecency,
+		RRFRankWindow:               env.Int("RRF_RANK_WINDOW", defaultRRFRankWindow),
+		RRFGraphStalenessThresholdS: env.Int("RRF_GRAPH_STALENESS_THRESHOLD_S", defaultGraphStalenessThresholdS),
+		RRFDropStaleGraphArms:       env.Bool("RRF_DROP_STALE_GRAPH_ARMS", false),
+		KeywordArm:                  parseKeywordArm(env.Str("KEYWORD_ARM", defaultKeywordArm)),
+		SparseEmbedURL:              env.Str("SPARSE_EMBED_URL", ""),
+		SparseEmbedModel:            env.Str("SPARSE_EMBED_MODEL", defaultSparseEmbedModel),
+		SparseEmbedMaxArray:         env.Int("SPARSE_EMBED_MAX_ARRAY", defaultSparseEmbedMaxArray),
+		SparseBackfillDeadline:      clampSparseBackfillDeadline(env.Int("SPARSE_BACKFILL_DEADLINE_S", defaultSparseBackfillDeadlineS)),
+		PrometheusURL:               env.Str("PROMETHEUS_URL", ""),
+		DozorURL:                    env.Str("DOZOR_URL", "http://dozor:8765"),
+		DozorAPIToken:               env.Str("DOZOR_API_TOKEN", ""),
+		JaegerURL:                   env.Str("JAEGER_URL", ""),
+		SourcemapAllowedHosts:       env.List("SOURCEMAP_ALLOWED_HOSTS", ""),
+		SourcemapMaxBodyBytes:       env.Int("SOURCEMAP_MAX_BODY_BYTES", defaultSourcemapMaxBodyBytes),
+		SourcemapRateLimit:          env.Float("SOURCEMAP_RATE_LIMIT", defaultSourcemapRateLimit),
+		SourcemapRateBurst:          env.Int("SOURCEMAP_RATE_BURST", defaultSourcemapRateBurst),
 
 		// Fleet probe settings — safe-by-default (SSH off, standard socket).
 		FleetDefaultHost:     env.Str("GOCODE_FLEET_DEFAULT_HOST", ""),

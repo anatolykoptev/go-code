@@ -43,6 +43,18 @@ type SemanticDeps struct {
 	// RRFWeights are the per-retriever weights threaded into MergeRRF.
 	// Defaults to (1.0, 1.0, 0.0, 0.25, 0.15, 0.1) — Sparse dark-launched at 0.0.
 	RRFWeights embeddings.RRFWeights
+	// GraphStalenessThreshold is the max graph age before the retrieval path
+	// considers the AGE graph stale (#691). Zero = use the default (30 min).
+	// When stale, the gate triggers self-heal + a degradation marker, and
+	// (when DropStaleGraphArms is true) drops the graph+hotspot arms.
+	GraphStalenessThreshold time.Duration
+	// DropStaleGraphArms is the dark-launch flag for the drop-and-renormalise
+	// sub-change (#691 C). Default false — changes ranking, needs A/B first.
+	DropStaleGraphArms bool
+	// GraphIndexCfg is the codegraph.IndexConfig passed to the self-heal
+	// background build. Mirrors the tool gate's indexCfg. Zero value is safe —
+	// IndexRepo applies defaults via applyConfigDefaults.
+	GraphIndexCfg codegraph.IndexConfig
 	// SparseClient is the SPLADE sparse embedder used for query-time retrieval
 	// (P4 dark-launch). Nil when SPARSE_EMBED_URL is unset — arm is bypassed
 	// entirely, yielding byte-identical behavior to the 2-arm baseline.
@@ -287,6 +299,30 @@ func handleSemanticHits(
 		deps.Pipeline.IndexRepoAsyncWithTool("semantic_search", repoKey, root)
 	}
 
+	// #691: Graph freshness gate for the retrieval path. The graph (0.25) +
+	// hotspot (0.15) arms — 40% of fused weight — read the AGE graph with no
+	// freshness check, silently blending an arbitrarily stale graph. Gate:
+	// check freshness (cached, cheap), self-heal if stale, mark the response,
+	// and optionally drop+renormalise the stale arms (dark flag). The fresh
+	// path is byte-identical to pre-#691 — no metric, no marker, no rebuild.
+	// Only runs when graph-dependent arms are active (Graph or Hotspot > 0).
+	var graphStaleAgeS float64
+	if deps.GraphStore != nil && (deps.RRFWeights.Graph > 0 || deps.RRFWeights.Hotspot > 0) {
+		threshold := deps.GraphStalenessThreshold
+		if threshold <= 0 {
+			threshold = time.Duration(defaultGraphStalenessThresholdS) * time.Second
+		}
+		weights := deps.RRFWeights
+		graphStaleAgeS = gateRetrievalGraphFreshness(
+			ctx, deps.GraphStore, root, repoKey,
+			retrievalIsRemote(input.Repo), deps.GraphIndexCfg,
+			threshold, deps.DropStaleGraphArms, &weights,
+		)
+		if graphStaleAgeS > 0 {
+			deps.RRFWeights = weights
+		}
+	}
+
 	// Graph expansion: add 1-hop CALLS neighbors before hybrid merge
 	// so graph-expanded symbols can participate in RRF naturally.
 	if deps.Expander != nil {
@@ -359,9 +395,9 @@ func handleSemanticHits(
 	}
 
 	if len(matched) > 0 || len(sparseHits) > 0 || len(graphHits) > 0 {
-		return hybridResult(ctx, input, deps, repoKey, root, results, matched, sparseHits, graphHits, prSignals, rerankCap, topK, t0)
+		return hybridResult(ctx, input, deps, repoKey, root, results, matched, sparseHits, graphHits, prSignals, rerankCap, topK, graphStaleAgeS, t0)
 	}
-	return semanticOnlyResult(ctx, input, deps, repoKey, root, results, prSignals, topK, maxDist, t0)
+	return semanticOnlyResult(ctx, input, deps, repoKey, root, results, prSignals, topK, maxDist, graphStaleAgeS, t0)
 }
 
 // runGraphArm generates graph-arm candidates for MergeRRF.
@@ -399,7 +435,7 @@ func hybridResult(
 	repoKey, root string, semantic []embeddings.SearchResult,
 	matched []embeddings.KeywordHit, sparse []embeddings.SparseHit, graph []embeddings.GraphHit,
 	prSignals []graphx.Signal,
-	rerankCap, topK int, t0 time.Time,
+	rerankCap, topK int, graphStaleAgeS float64, t0 time.Time,
 ) (*mcp.CallToolResult, error) {
 	// Build the union of candidate symbols so the signal arms (hotspot/recency)
 	// can rank the same pool the primary retrievers produced.
@@ -415,7 +451,7 @@ func hybridResult(
 		flat[i] = h.SearchResult
 		flat[i].Source = h.Source
 	}
-	return finalResult(ctx, input, deps, repoKey, root, flat, prSignals, topK, t0)
+	return finalResult(ctx, input, deps, repoKey, root, flat, prSignals, topK, graphStaleAgeS, t0)
 }
 
 // semanticOnlyResult filters by distance then applies CE rerank → annotate → format.
@@ -431,7 +467,7 @@ func semanticOnlyResult(
 	ctx context.Context, input SemanticSearchInput, deps SemanticDeps,
 	repoKey, root string, results []embeddings.SearchResult,
 	prSignals []graphx.Signal,
-	topK int, maxDist float32, t0 time.Time,
+	topK int, maxDist float32, graphStaleAgeS float64, t0 time.Time,
 ) (*mcp.CallToolResult, error) {
 	// Fallback to pure semantic — filter by distance (graph results have Distance=1.0).
 	// Dedup by FilePath+":"+SymbolName, keeping the lowest Distance (best match).
@@ -476,7 +512,7 @@ func semanticOnlyResult(
 		flat[i] = h.SearchResult
 		flat[i].Source = h.Source
 	}
-	return finalResult(ctx, input, deps, repoKey, root, flat, prSignals, topK, t0)
+	return finalResult(ctx, input, deps, repoKey, root, flat, prSignals, topK, graphStaleAgeS, t0)
 }
 
 // finalResult runs stale-demote → CE reranking → PageRank annotation → freshness wrap → format.
@@ -487,7 +523,7 @@ func finalResult(
 	ctx context.Context, input SemanticSearchInput, deps SemanticDeps,
 	repoKey, root string, candidates []embeddings.SearchResult,
 	prSignals []graphx.Signal,
-	topK int, t0 time.Time,
+	topK int, graphStaleAgeS float64, t0 time.Time,
 ) (*mcp.CallToolResult, error) {
 	// Stale-demote safety-net (defense-in-depth on top of Bug B orphan hard-delete):
 	// partition fresh-then-stale so missed orphan rows surface at the bottom, not
@@ -503,6 +539,13 @@ func finalResult(
 	env := mcpmeta.Wrap(time.Since(t0), hint)
 	if sha := deps.AnalyzeDeps.IndexedSHA(ctx, repoKey); sha != "" {
 		env = mcpmeta.WithFreshness(env, root, sha)
+	}
+	// #691: degradation marker — when the retrieval path fused a stale AGE
+	// graph, carry the graph age on the response envelope so a caller can
+	// tell it received degraded ranking. Zero (omitted via omitempty) when
+	// the graph is fresh — byte-identical to pre-#691 behavior.
+	if graphStaleAgeS > 0 {
+		env.GraphStaleAgeS = graphStaleAgeS
 	}
 	formatted := formatSemanticResults(input, reranked, deps.AnalyzeDeps.PathMappings)
 	// Meta footer goes on BEFORE budget shaping so a truncation cut keeps the

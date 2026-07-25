@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/anatolykoptev/vaelor/internal/analyze"
 	"github.com/anatolykoptev/vaelor/internal/codegraph"
@@ -103,6 +104,17 @@ func newSemanticDeps(
 		RRFWeights:   rrfWeights,
 		SparseClient: sparseClient,
 		KeywordArm:   cfg.KeywordArm,
+		// #691: retrieval-path freshness gate config.
+		GraphStalenessThreshold: time.Duration(cfg.RRFGraphStalenessThresholdS) * time.Second,
+		DropStaleGraphArms:      cfg.RRFDropStaleGraphArms,
+		GraphIndexCfg: codegraph.IndexConfig{
+			TTLLocal:            cfg.GraphTTLLocal,
+			TTLRemote:           cfg.GraphTTLRemote,
+			BatchSize:           cfg.GraphBatchSize,
+			EnableSurpriseIndex: cfg.CodegraphSurpriseIndex,
+			FlowsMax:            cfg.FlowsMax,
+			FlowsDFSDepth:       cfg.FlowsDFSDepth,
+		},
 	}
 }
 
