@@ -18,11 +18,11 @@ import (
 
 // ImpactInput is the input schema for the impact_analysis tool.
 type ImpactInput struct {
-	Repo     string `json:"repo" jsonschema_description:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
-	Symbol   string `json:"symbol" jsonschema_description:"Function or method name to analyze impact for"`
-	Depth    int    `json:"depth,omitempty" jsonschema_description:"Max traversal depth for transitive callers (default 5, max 10)"`
-	Focus    string `json:"focus,omitempty" jsonschema_description:"Subdirectory path to limit scope (e.g. internal/auth), or space-separated keywords (e.g. 'auth handler')"`
-	Language string `json:"language,omitempty" jsonschema_description:"Limit to files of this language (e.g. go, python)"`
+	Repo     string `json:"repo" jsonschema:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
+	Symbol   string `json:"symbol" jsonschema:"Function or method name to analyze impact for"`
+	Depth    int    `json:"depth,omitempty" jsonschema:"Max traversal depth for transitive callers (default 5, max 10)"`
+	Focus    string `json:"focus,omitempty" jsonschema:"Subdirectory path to limit scope (e.g. internal/auth), or space-separated keywords (e.g. 'auth handler')"`
+	Language string `json:"language,omitempty" jsonschema:"Limit to files of this language (e.g. go, python)"`
 }
 
 const (

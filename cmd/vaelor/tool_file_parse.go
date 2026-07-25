@@ -17,19 +17,19 @@ const outputFormatAST = "ast"
 // FileParseInput is the input schema for the file_parse tool.
 type FileParseInput struct {
 	// Repo is optional: GitHub slug or URL. When set, path is relative to the repo root.
-	Repo string `json:"repo,omitempty" jsonschema_description:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path. When set, path is relative to repo root."`
+	Repo string `json:"repo,omitempty" jsonschema:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path. When set, path is relative to repo root."`
 
 	// Ref is the branch, tag, or commit SHA (only used with repo).
-	Ref string `json:"ref,omitempty" jsonschema_description:"Branch, tag, or commit SHA (default: HEAD). Only used with repo."`
+	Ref string `json:"ref,omitempty" jsonschema:"Branch, tag, or commit SHA (default: HEAD). Only used with repo."`
 
 	// Path is the file path. Absolute for local files, or relative to repo root when repo is set.
-	Path string `json:"path" jsonschema_description:"File path: absolute for local files, or relative to repo root when repo is set"`
+	Path string `json:"path" jsonschema:"File path: absolute for local files, or relative to repo root when repo is set"`
 
 	// Language overrides auto-detection.
-	Language string `json:"language,omitempty" jsonschema_description:"Language override (go/python/typescript/rust/java/c/cpp). Auto-detected if omitted."`
+	Language string `json:"language,omitempty" jsonschema:"Language override (go/python/typescript/rust/java/c/cpp). Auto-detected if omitted."`
 
 	// OutputFormat controls what is returned.
-	OutputFormat string `json:"output_format,omitempty" jsonschema_description:"Output format: ast (raw tree) | symbols (functions types vars) (default: symbols)"`
+	OutputFormat string `json:"output_format,omitempty" jsonschema:"Output format: ast (raw tree) | symbols (functions types vars) (default: symbols)"`
 }
 
 func registerFileParse(server *mcp.Server, cfg Config, deps analyze.Deps) {

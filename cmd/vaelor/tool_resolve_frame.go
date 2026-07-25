@@ -29,11 +29,11 @@ const resolveFrameTTL = 10 * time.Minute
 // ResolveFrameInput is the MCP tool input schema for resolve_frame.
 type ResolveFrameInput struct {
 	// URL is the URL of the minified JS bundle (not the .map file).
-	URL string `json:"url"`
+	URL string `json:"url" jsonschema:"URL of the minified JS bundle (not the .map file). The companion .map file is resolved automatically. Host must be in the SOURCEMAP_ALLOWED_HOSTS allowlist."`
 	// Line is the 1-based line number from the browser stack frame.
-	Line int `json:"line"`
+	Line int `json:"line" jsonschema:"1-based line number from the browser stack frame"`
 	// Column is the 1-based column number from the browser stack frame.
-	Column int `json:"column"`
+	Column int `json:"column" jsonschema:"1-based column number from the browser stack frame"`
 }
 
 // registerResolveFrame registers the resolve_frame MCP tool. If

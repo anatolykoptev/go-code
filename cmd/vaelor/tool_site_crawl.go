@@ -10,11 +10,11 @@ import (
 
 // SiteCrawlInput is the input schema for the site_crawl tool.
 type SiteCrawlInput struct {
-	URL             string `json:"url" jsonschema_description:"Seed URL to start crawling from (e.g. https://example.com)"`
-	MaxDepth        int    `json:"max_depth,omitempty" jsonschema_description:"Maximum crawl depth (default: 3)"`
-	MaxPages        int    `json:"max_pages,omitempty" jsonschema_description:"Maximum number of pages to crawl (default: 50)"`
-	Scope           string `json:"scope,omitempty" jsonschema_description:"URL scope: same_domain (default) or same_host"`
-	IncludeMarkdown *bool  `json:"include_markdown,omitempty" jsonschema_description:"Include markdown content for each page (default: true)"`
+	URL             string `json:"url" jsonschema:"Seed URL to start crawling from (e.g. https://example.com)"`
+	MaxDepth        int    `json:"max_depth,omitempty" jsonschema:"Maximum crawl depth (default: 3)"`
+	MaxPages        int    `json:"max_pages,omitempty" jsonschema:"Maximum number of pages to crawl (default: 50)"`
+	Scope           string `json:"scope,omitempty" jsonschema:"URL scope: same_domain (default) or same_host"`
+	IncludeMarkdown *bool  `json:"include_markdown,omitempty" jsonschema:"Include markdown content for each page (default: true)"`
 }
 
 const (

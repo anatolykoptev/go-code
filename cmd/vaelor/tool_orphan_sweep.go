@@ -18,7 +18,7 @@ import (
 // perform the real bulk DELETE. A plain bool would default to false=delete,
 // the opposite of the safe default — do not use a plain bool.
 type OrphanSweepInput struct {
-	DryRun *bool `json:"dry_run,omitempty" jsonschema_description:"Defaults to TRUE (preview only: counts orphan repo_keys and the rows that would be deleted, with NO mutation). Set to false explicitly to perform the real bulk DELETE of code_embeddings rows whose repo_key has no matching code_repo_state row."`
+	DryRun *bool `json:"dry_run,omitempty" jsonschema:"Defaults to TRUE (preview only: counts orphan repo_keys and the rows that would be deleted, with NO mutation). Set to false explicitly to perform the real bulk DELETE of code_embeddings rows whose repo_key has no matching code_repo_state row."`
 }
 
 // orphanSweepStore is the subset of *embeddings.Store the handler needs.

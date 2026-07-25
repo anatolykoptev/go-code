@@ -15,7 +15,7 @@ import (
 
 // SparseBackfillInput is the input schema for the sparse_backfill tool.
 type SparseBackfillInput struct {
-	RepoKey string `json:"repo_key,omitempty" jsonschema_description:"Optional: scope backfill to a single repo key (e.g. 'code_a3f2b1c0'). Leave empty to backfill all repos with NULL sparse_embedding rows."`
+	RepoKey string `json:"repo_key,omitempty" jsonschema:"Optional: scope backfill to a single repo key (e.g. 'code_a3f2b1c0'). Leave empty to backfill all repos with NULL sparse_embedding rows."`
 }
 
 // registerSparseBackfill registers the sparse_backfill MCP tool.

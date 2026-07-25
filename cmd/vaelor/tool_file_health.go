@@ -178,8 +178,8 @@ var defaultHealthWeights = map[string]float64{
 
 // FileHealthArgs is the input schema for the get_file_health tool.
 type FileHealthArgs struct {
-	Repo  string   `json:"repo"  jsonschema_description:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
-	Paths []string `json:"paths,omitempty" jsonschema_description:"File paths (relative to repo root) to score. Defaults to top-20 hotspot files by churn."`
+	Repo  string   `json:"repo"  jsonschema:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
+	Paths []string `json:"paths,omitempty" jsonschema:"File paths (relative to repo root) to score. Defaults to top-20 hotspot files by churn."`
 }
 
 // FileHealthResult is the JSON payload returned by the get_file_health tool.

@@ -19,18 +19,18 @@ import (
 // posting to GitHub or persisting learnings. Set DryRun=false to post
 // the review as a GitHub PR review and persist per-symbol learnings.
 type ReviewPRInput struct {
-	Repo  string `json:"repo" jsonschema_description:"Repository: GitHub slug (owner/repo) or full URL"`
-	PR    int    `json:"pr" jsonschema_description:"Pull request number"`
-	Depth int    `json:"depth,omitempty" jsonschema_description:"Impact traversal depth (default 2, max 5)"`
+	Repo  string `json:"repo" jsonschema:"Repository: GitHub slug (owner/repo) or full URL"`
+	PR    int    `json:"pr" jsonschema:"Pull request number"`
+	Depth int    `json:"depth,omitempty" jsonschema:"Impact traversal depth (default 2, max 5)"`
 	// Language limits analysis to files of the given language (dry-run path only).
-	Language string `json:"language,omitempty" jsonschema_description:"Limit to files of this language"`
+	Language string `json:"language,omitempty" jsonschema:"Limit to files of this language"`
 	// DryRun controls whether the review is posted. When true (default) the
 	// review XML/body is returned without any side effects. Set false to post
 	// to GitHub and write learnings.
-	DryRun bool `json:"dry_run,omitempty" jsonschema_description:"When true (default), returns the review without posting or persisting. Set false to post to GitHub + write learnings."`
+	DryRun bool `json:"dry_run,omitempty" jsonschema:"When true (default), returns the review without posting or persisting. Set false to post to GitHub + write learnings."`
 	// Event is the GitHub review event. Required when DryRun=false.
 	// Accepted values: APPROVE | COMMENT | REQUEST_CHANGES.
-	Event string `json:"event,omitempty" jsonschema_description:"Required when dry_run=false: APPROVE | COMMENT | REQUEST_CHANGES."`
+	Event string `json:"event,omitempty" jsonschema:"Required when dry_run=false: APPROVE | COMMENT | REQUEST_CHANGES."`
 }
 
 func registerReviewPR(server *mcp.Server, _ Config, deps analyze.Deps, graphStore *codegraph.Store) {

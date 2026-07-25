@@ -16,12 +16,12 @@ import (
 
 // CodeCompareInput is the input schema for the code_compare tool.
 type CodeCompareInput struct {
-	RepoA    string `json:"repo_a" jsonschema_description:"First repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
-	RepoB    string `json:"repo_b" jsonschema_description:"Second repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
-	Query    string `json:"query,omitempty" jsonschema_description:"What to compare — quality aspects, architectural patterns, specific concerns (default: general comparison)"`
-	Focus    string `json:"focus,omitempty" jsonschema_description:"Subdirectory path to limit comparison scope (e.g. internal/auth, pkg/api), or space-separated keywords (e.g. 'auth handler'). Use query for topic focus."`
-	Language string `json:"language,omitempty" jsonschema_description:"Limit comparison to files of this language (e.g. go, python, rust)"`
-	MaxBytes int    `json:"max_bytes,omitempty" jsonschema_description:"Response budget in bytes (default 8192). When the response exceeds this, the ranked head is returned with a continuation footer."`
+	RepoA    string `json:"repo_a" jsonschema:"First repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
+	RepoB    string `json:"repo_b" jsonschema:"Second repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
+	Query    string `json:"query,omitempty" jsonschema:"What to compare — quality aspects, architectural patterns, specific concerns (default: general comparison)"`
+	Focus    string `json:"focus,omitempty" jsonschema:"Subdirectory path to limit comparison scope (e.g. internal/auth, pkg/api), or space-separated keywords (e.g. 'auth handler'). Use query for topic focus."`
+	Language string `json:"language,omitempty" jsonschema:"Limit comparison to files of this language (e.g. go, python, rust)"`
+	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"Response budget in bytes (default 8192). When the response exceeds this, the ranked head is returned with a continuation footer."`
 }
 
 // registerCodeCompare registers the code_compare MCP tool.

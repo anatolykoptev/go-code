@@ -47,10 +47,10 @@ type xmlDeadSymbol struct {
 
 // DeadCodeInput is the input schema for the dead_code tool.
 type DeadCodeInput struct {
-	Repo            string `json:"repo" jsonschema_description:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
-	Language        string `json:"language,omitempty" jsonschema_description:"Limit analysis to files of this language (e.g. go, python)"`
-	IncludeExported bool   `json:"include_exported,omitempty" jsonschema_description:"Include exported/public functions (usually false positives, default: false)"`
-	Focus           string `json:"focus,omitempty" jsonschema_description:"Optional focus area for the LLM narrative"`
+	Repo            string `json:"repo" jsonschema:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
+	Language        string `json:"language,omitempty" jsonschema:"Limit analysis to files of this language (e.g. go, python)"`
+	IncludeExported bool   `json:"include_exported,omitempty" jsonschema:"Include exported/public functions (usually false positives, default: false)"`
+	Focus           string `json:"focus,omitempty" jsonschema:"Optional focus area for the LLM narrative"`
 }
 
 func registerDeadCode(server *mcp.Server, cfg Config, deps analyze.Deps, store *codegraph.Store) {

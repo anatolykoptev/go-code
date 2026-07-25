@@ -51,11 +51,11 @@ type codeGraphStatusXML struct {
 
 // CodeGraphInput is the input schema for the code_graph tool.
 type CodeGraphInput struct {
-	Repo      string `json:"repo" jsonschema_description:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
-	Query     string `json:"query" jsonschema_description:"Natural language question about the code graph (e.g. 'who calls ParseFile?', 'what depends on package store?', 'find dead code')"`
-	Language  string `json:"language,omitempty" jsonschema_description:"Limit graph to files of this language (e.g. go, python)"`
-	Refresh   bool   `json:"refresh,omitempty" jsonschema_description:"Force re-indexing of the graph even if cached"`
-	Narrative *bool  `json:"narrative,omitempty" jsonschema_description:"Set to false to skip LLM narrative generation and return only raw graph rows + Cypher (faster, fewer tokens). Default: true"`
+	Repo      string `json:"repo" jsonschema:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
+	Query     string `json:"query" jsonschema:"Natural language question about the code graph (e.g. 'who calls ParseFile?', 'what depends on package store?', 'find dead code')"`
+	Language  string `json:"language,omitempty" jsonschema:"Limit graph to files of this language (e.g. go, python)"`
+	Refresh   bool   `json:"refresh,omitempty" jsonschema:"Force re-indexing of the graph even if cached"`
+	Narrative *bool  `json:"narrative,omitempty" jsonschema:"Set to false to skip LLM narrative generation and return only raw graph rows + Cypher (faster, fewer tokens). Default: true"`
 }
 
 // registerCodeGraph registers the code_graph MCP tool.

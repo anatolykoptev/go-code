@@ -14,13 +14,13 @@ import (
 )
 
 type ReviewDeltaInput struct {
-	Repo            string `json:"repo" jsonschema_description:"Repository: GitHub slug (owner/repo), full URL, or absolute local host path"`
-	Base            string `json:"base,omitempty" jsonschema_description:"Base ref to diff against (commit SHA, branch, tag, HEAD~N). Default: HEAD~1"`
-	Head            string `json:"head,omitempty" jsonschema_description:"Head ref for the diff (commit SHA, branch, tag). Default: HEAD. The DIFF is computed base..head; when head differs from the current checkout, impacted-symbol analysis runs against an isolated worktree at head so it reflects head tree (falls back to the working tree with a note if the worktree cannot be created)."`
-	Depth           int    `json:"depth,omitempty" jsonschema_description:"Impact traversal depth (default 2, max 5)"`
-	Language        string `json:"language,omitempty" jsonschema_description:"Limit to files of this language (e.g. go, python)"`
-	ExcludeSnippets bool   `json:"exclude_snippets,omitempty" jsonschema_description:"Set true to omit source code snippets (included by default)"`
-	FullImpact      bool   `json:"full_impact,omitempty" jsonschema_description:"Set true to return the COMPLETE impacted_symbols list, uncapped. Default caps to the top maxReviewImpacted entries (ranked by impact distance ascending, then confidence descending) and marks the response truncated=true with the true total when more exist."`
+	Repo            string `json:"repo" jsonschema:"Repository: GitHub slug (owner/repo), full URL, or absolute local host path"`
+	Base            string `json:"base,omitempty" jsonschema:"Base ref to diff against (commit SHA, branch, tag, HEAD~N). Default: HEAD~1"`
+	Head            string `json:"head,omitempty" jsonschema:"Head ref for the diff (commit SHA, branch, tag). Default: HEAD. The DIFF is computed base..head; when head differs from the current checkout, impacted-symbol analysis runs against an isolated worktree at head so it reflects head tree (falls back to the working tree with a note if the worktree cannot be created)."`
+	Depth           int    `json:"depth,omitempty" jsonschema:"Impact traversal depth (default 2, max 5)"`
+	Language        string `json:"language,omitempty" jsonschema:"Limit to files of this language (e.g. go, python)"`
+	ExcludeSnippets bool   `json:"exclude_snippets,omitempty" jsonschema:"Set true to omit source code snippets (included by default)"`
+	FullImpact      bool   `json:"full_impact,omitempty" jsonschema:"Set true to return the COMPLETE impacted_symbols list, uncapped. Default caps to the top maxReviewImpacted entries (ranked by impact distance ascending, then confidence descending) and marks the response truncated=true with the true total when more exist."`
 }
 
 const (

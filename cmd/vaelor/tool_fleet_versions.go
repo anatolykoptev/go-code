@@ -17,10 +17,10 @@ import (
 
 // FleetVersionsInput is the input schema for the fleet_versions tool.
 type FleetVersionsInput struct {
-	Repo    string   `json:"repo,omitempty"    jsonschema_description:"Path or GitHub URL to the indexed repo. Pinned image versions are extracted from its Dockerfile and docker-compose*.yml files. Empty = runtime probe only."`
-	Host    string   `json:"host,omitempty"    jsonschema_description:"Single probe target. Empty or 'local://' = local docker socket (default); 'ssh://[user@]host[:port]' = remote via system ssh (requires GOCODE_FLEET_SSH_ENABLE=true). Superseded by 'hosts' when both are set."`
-	Hosts   []string `json:"hosts,omitempty"   jsonschema_description:"Multiple probe targets in one call. When present, supersedes 'host'. Each is local://, docker://, or ssh://[user@]host[:port]. Sibling-drift across hosts is reported in the sibling_drifts top-level field."`
-	Service string   `json:"service,omitempty" jsonschema_description:"Optional filter: matches container name first, then com.docker.compose.service label. Pass empty to list all containers."`
+	Repo    string   `json:"repo,omitempty"    jsonschema:"Path or GitHub URL to the indexed repo. Pinned image versions are extracted from its Dockerfile and docker-compose*.yml files. Empty = runtime probe only."`
+	Host    string   `json:"host,omitempty"    jsonschema:"Single probe target. Empty or 'local://' = local docker socket (default); 'ssh://[user@]host[:port]' = remote via system ssh (requires GOCODE_FLEET_SSH_ENABLE=true). Superseded by 'hosts' when both are set."`
+	Hosts   []string `json:"hosts,omitempty"   jsonschema:"Multiple probe targets in one call. When present, supersedes 'host'. Each is local://, docker://, or ssh://[user@]host[:port]. Sibling-drift across hosts is reported in the sibling_drifts top-level field."`
+	Service string   `json:"service,omitempty" jsonschema:"Optional filter: matches container name first, then com.docker.compose.service label. Pass empty to list all containers."`
 }
 
 // FleetVersionsOutput is the JSON-serialised response for fleet_versions.

@@ -19,12 +19,12 @@ import (
 
 // UnderstandInput is the input schema for the understand tool.
 type UnderstandInput struct {
-	Repo           string `json:"repo" jsonschema_description:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
-	Symbol         string `json:"symbol" jsonschema_description:"Function or method name to analyze in depth"`
-	Focus          string `json:"focus,omitempty" jsonschema_description:"Subdirectory path to limit scope"`
-	Language       string `json:"language,omitempty" jsonschema_description:"Limit to files of this language"`
-	IncludeCallers bool   `json:"include_callers,omitempty" jsonschema_description:"Include who calls this symbol (default: false)"`
-	FieldAccess    bool   `json:"field_access,omitempty" jsonschema_description:"When true, include heuristic argument-reference call sites (struct field accesses, identifier args) as callees even when they don't resolve to a known function — legacy permissive behaviour. Default false: only true call expressions and resolved function references are reported."`
+	Repo           string `json:"repo" jsonschema:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
+	Symbol         string `json:"symbol" jsonschema:"Function or method name to analyze in depth"`
+	Focus          string `json:"focus,omitempty" jsonschema:"Subdirectory path to limit scope"`
+	Language       string `json:"language,omitempty" jsonschema:"Limit to files of this language"`
+	IncludeCallers bool   `json:"include_callers,omitempty" jsonschema:"Include who calls this symbol (default: false)"`
+	FieldAccess    bool   `json:"field_access,omitempty" jsonschema:"When true, include heuristic argument-reference call sites (struct field accesses, identifier args) as callees even when they don't resolve to a known function — legacy permissive behaviour. Default false: only true call expressions and resolved function references are reported."`
 }
 
 // understandBuildFromRepo is the production seam for callgraph.BuildFromRepo;

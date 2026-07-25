@@ -18,30 +18,30 @@ import (
 // SymbolSearchInput is the input schema for the symbol_search tool.
 type SymbolSearchInput struct {
 	// Repo is the GitHub repo slug (owner/repo) or local filesystem path.
-	Repo string `json:"repo" jsonschema_description:"GitHub repo slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
+	Repo string `json:"repo" jsonschema:"GitHub repo slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
 
 	// Query is the symbol name or pattern to search for.
-	Query string `json:"query,omitempty" jsonschema_description:"Symbol name or pattern to search (supports wildcards: Auth* or *Handler)"`
+	Query string `json:"query,omitempty" jsonschema:"Symbol name or pattern to search (supports wildcards: Auth* or *Handler)"`
 
 	// Symbol is an alias for Query — matches call_trace/impact_analysis naming.
-	Symbol string `json:"symbol,omitempty" jsonschema_description:"Alias for query — symbol name or pattern (supports wildcards: Auth* or *Handler)"`
+	Symbol string `json:"symbol,omitempty" jsonschema:"Alias for query — symbol name or pattern (supports wildcards: Auth* or *Handler)"`
 
 	// Kind filters by symbol kind: function, method, type, struct, interface, const, var.
-	Kind string `json:"kind,omitempty" jsonschema_description:"Filter by kind: function | method | type | struct | interface | const | var (default: all)"`
+	Kind string `json:"kind,omitempty" jsonschema:"Filter by kind: function | method | type | struct | interface | const | var (default: all)"`
 
 	// Language filters to files of a specific language.
-	Language string `json:"language,omitempty" jsonschema_description:"Limit search to files of this language (e.g. go, python)"`
+	Language string `json:"language,omitempty" jsonschema:"Limit search to files of this language (e.g. go, python)"`
 
 	// IncludeBody includes the full function/type body in results.
-	IncludeBody bool `json:"include_body,omitempty" jsonschema_description:"Include the full source body in results (default: false, only signatures)"`
+	IncludeBody bool `json:"include_body,omitempty" jsonschema:"Include the full source body in results (default: false, only signatures)"`
 
 	// Limit caps the number of results returned.
-	Limit int `json:"limit,omitempty" jsonschema_description:"Maximum number of results to return. Default 100, max 500."`
+	Limit int `json:"limit,omitempty" jsonschema:"Maximum number of results to return. Default 100, max 500."`
 
 	// Pattern is an ast-grep structural pattern for shape-based search.
 	// Required to run via ox-codes; mutually exclusive with name-based query
 	// (Pattern wins when both are set). Requires Language.
-	Pattern string `json:"pattern,omitempty" jsonschema_description:"ast-grep structural pattern (e.g. 'func $NAME($CTX context.Context, $$$) error' to find error-returning funcs taking context). Requires language. When set, name-based query is ignored."`
+	Pattern string `json:"pattern,omitempty" jsonschema:"ast-grep structural pattern (e.g. 'func $NAME($CTX context.Context, $$$) error' to find error-returning funcs taking context). Requires language. When set, name-based query is ignored."`
 }
 
 type xmlSymbolSearchResponse struct {
