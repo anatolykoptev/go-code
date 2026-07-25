@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.59.10](https://github.com/anatolykoptev/go-code/compare/v1.59.9...v1.59.10) (2026-07-25)
+
+
+### Fixed
+
+* **embeddings:** reconcile stale file_path rows under live repo_keys ([#708](https://github.com/anatolykoptev/go-code/issues/708)) ([#710](https://github.com/anatolykoptev/go-code/issues/710)) ([3e0fb2c](https://github.com/anatolykoptev/go-code/commit/3e0fb2cbbaca8f517d0bec547d15aa028f2ab5c6))
+
 ## [1.59.9](https://github.com/anatolykoptev/vaelor/compare/v1.59.8...v1.59.9) (2026-07-25)
 
 
