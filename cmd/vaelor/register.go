@@ -319,6 +319,21 @@ func registerTools(ctx context.Context, server *mcp.Server, cfg Config, reg *kit
 	registerSuggestReviewers(server, cfg, deps)
 	registerFederatedCoChange(server, cfg, deps)
 
+	// Publish the unified capability gauge for every subsystem whose
+	// enable/disable state is resolved here in registerTools (the subsystem
+	// functions above publish their own: semantic_search, sparse_retrieval,
+	// learnings_store, github_app_auth). Pre-touch at init() guarantees every
+	// series exists from a cold start; these calls flip the enabled ones to 1.
+	setCapability("code_graph", graphStore != nil)
+	setCapability("graph_signals", graphStore != nil)
+	setCapability("find_duplicates", semDeps.Store != nil)
+	setCapability("sparse_backfill", semDeps.SparseClient != nil && semDeps.Store != nil)
+	setCapability("design_search", designDeps.Client != nil)
+	setCapability("resolve_frame", len(cfg.SourcemapAllowedHosts) > 0)
+	setCapability("dataflow_analyze", deps.OxCodes != nil)
+	setCapability("web_search", deps.WebSearch != nil)
+	setCapability("llm", hasKey)
+
 	// Auto-index local repos in background.
 	if semDeps.Pipeline != nil && len(cfg.AutoIndexDirs) > 0 {
 		opts := embeddings.AutoIndexOpts{
@@ -516,13 +531,16 @@ func buildLearningsStore(cfg Config) *learnings.Store {
 		slog.Warn("config: learnings store disabled — neither LEARNINGS_DATABASE_URL nor DATABASE_URL set; remember_graph_insights and prior_learnings in understand will be unavailable",
 			slog.String("env_var", "LEARNINGS_DATABASE_URL"),
 		)
+		setCapability("learnings_store", false)
 		return nil
 	}
 	ls, err := learnings.New(context.Background(), cfg.LearningsDSN, nil)
 	if err != nil {
 		slog.Warn("learnings store disabled", "err", err)
+		setCapability("learnings_store", false)
 		return nil
 	}
+	setCapability("learnings_store", true)
 	return ls
 }
 

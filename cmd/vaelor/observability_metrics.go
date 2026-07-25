@@ -80,8 +80,10 @@ func wireSparse(cfg Config, rrfWeights embeddings.RRFWeights) (sparse.SparseEmbe
 	}
 	if sparseClient != nil {
 		sparseEmbedderActiveGauge.Set(1)
+		setCapability("sparse_retrieval", true)
 	} else {
 		sparseEmbedderActiveGauge.Set(0)
+		setCapability("sparse_retrieval", false)
 		// Preserve the #602 warning (from the config-warnings work): if the
 		// sparse arm is off but a positive RRF sparse weight is configured,
 		// the operator has a silently-inert knob — say so.
