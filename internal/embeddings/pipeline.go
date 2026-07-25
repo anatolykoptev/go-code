@@ -66,16 +66,17 @@ const repoStateRetryBackoff = 150 * time.Millisecond
 type Pipeline struct {
 	client            *embed.Client
 	store             *Store
-	embedModel        string                                                           // active embedding model name; stored alongside head_sha for cross-model reindex detection
-	writeRepoState    func(ctx context.Context, repoKey, sha, sourcePath string) error // defaults to a closure over store.SetRepoStateWithPath + embedModel; injectable for testing
-	writeSparsesBatch func(ctx context.Context, rows []SparseUpdate) error             // defaults to store.UpdateSparseEmbeddingsBatch; injectable for testing
-	deleteRepo        func(ctx context.Context, repoKey string) error                  // defaults to store.DeleteRepo; injectable for testing (compensating rollback)
-	progress          sync.Map                                                         // repoKey -> *indexProgress
-	fileCache         *kitcache.Cache                                                  // optional per-file symbol-entry cache; nil disables.
-	sparseClient      sparse.SparseEmbedder                                            // optional SPLADE embedder; nil disables sparse indexing (cold-path: byte-identical to dense-only)
-	sparseMaxBatch    int                                                              // per-request cap for sparse server (EMBED_MAX_INPUT_ARRAY); defaults to sparseServerMaxDocs
-	indexBudget       time.Duration                                                    // per-goroutine timeout for IndexRepoAsyncWithTool; 0 uses defaultIndexBudget
-	expandSymbolKinds bool                                                             // #664: gate macro/module/type-alias extraction + LOI embed text (EXPAND_SYMBOL_KINDS, default false)
+	embedModel        string                                                                                       // active embedding model name; stored alongside head_sha for cross-model reindex detection
+	writeRepoState    func(ctx context.Context, repoKey, sha, sourcePath string) error                             // defaults to a closure over store.SetRepoStateWithPath + embedModel; injectable for testing
+	writeSparsesBatch func(ctx context.Context, rows []SparseUpdate) error                                         // defaults to store.UpdateSparseEmbeddingsBatch; injectable for testing
+	deleteRepo        func(ctx context.Context, repoKey string) error                                              // defaults to store.DeleteRepo; injectable for testing (compensating rollback)
+	reconcilePaths    func(ctx context.Context, repoKey, sourcePath string, dryRun bool) (*ReconcileResult, error) // defaults to store.ReconcileRepoPaths; injectable for testing (#708 path-existence reconciliation hook)
+	progress          sync.Map                                                                                     // repoKey -> *indexProgress
+	fileCache         *kitcache.Cache                                                                              // optional per-file symbol-entry cache; nil disables.
+	sparseClient      sparse.SparseEmbedder                                                                        // optional SPLADE embedder; nil disables sparse indexing (cold-path: byte-identical to dense-only)
+	sparseMaxBatch    int                                                                                          // per-request cap for sparse server (EMBED_MAX_INPUT_ARRAY); defaults to sparseServerMaxDocs
+	indexBudget       time.Duration                                                                                // per-goroutine timeout for IndexRepoAsyncWithTool; 0 uses defaultIndexBudget
+	expandSymbolKinds bool                                                                                         // #664: gate macro/module/type-alias extraction + LOI embed text (EXPAND_SYMBOL_KINDS, default false)
 }
 
 // NewPipeline creates a Pipeline backed by the given client and store.
@@ -94,6 +95,7 @@ func NewPipeline(client *embed.Client, store *Store, model string, opts ...Pipel
 		embedModel:        model,
 		writeSparsesBatch: store.UpdateSparseEmbeddingsBatch,
 		deleteRepo:        store.DeleteRepo,
+		reconcilePaths:    store.ReconcileRepoPaths,
 	}
 	// writeRepoState closes over model so the injectable fn keeps a (ctx, repoKey, sha)
 	// signature (no model param) — avoids a breaking change in test injectors.
@@ -555,6 +557,31 @@ func (p *Pipeline) indexRepoWithTool(
 
 	toEmbed, seen := filterSymbols(symbols, files, existing, result, p.expandSymbolKinds)
 
+	// Path-existence reconciliation (#708): delete rows under this repo_key
+	// whose file_path does not resolve under the repo root. Runs AFTER the
+	// parse so it is gated by the same shrink-guard as the orphan delete
+	// (shrinkGuardFires) — a partial parse must not trigger a stale-path
+	// mass-delete any more than an orphan-key mass-delete. The intra-key
+	// orphan reconciliation (deleteIntraKeyOrphans) only covers per-symbol
+	// cleanup; it cannot catch a file_path that belongs to a different
+	// project sharing the same repo_key (the FNV(path) rename collision at
+	// the heart of #708).
+	//
+	// Non-fatal: a reconciliation error is logged and swallowed so it never
+	// blocks indexing. The root-missing guard inside ReconcileRepoPaths
+	// ensures a mount blip deletes nothing.
+	//
+	// Does NOT run on the same-SHA fast path (above): a fast-path skip means
+	// the repo hasn't changed since the last successful index, so no stale
+	// paths can have appeared. A full-walk index (SHA changed or non-git) is
+	// where renames surface.
+	if p.reconcilePaths != nil && root != "" && !shrinkGuardFires(seen, existing) {
+		if _, rErr := p.reconcilePaths(ctx, repoKey, root, false); rErr != nil {
+			slog.Warn("indexRepo: path reconciliation failed (non-fatal)",
+				slog.String("repo", repoKey), slog.Any("error", rErr))
+		}
+	}
+
 	// Compute the explicit orphan set: DB keys present for this repo_key that
 	// are NOT in the freshly-parsed symbol set. `existing` is the full DB-hash
 	// map read above; `seen` is the complete parsed key set from filterSymbols.
@@ -696,6 +723,17 @@ func filterSymbols(
 	return toEmbed, seen
 }
 
+// shrinkGuardFires returns true when the parsed symbol-key set is suspiciously
+// small relative to the existing DB-key set — a partial-parse signal that means
+// NO deletes (orphan symbol keys OR stale file_paths) should proceed. The 0.7
+// threshold catches accidental partial-parse mass-delete without blocking
+// legitimate large deletions. Shared by deleteIntraKeyOrphans and the
+// path-existence reconciliation so both delete paths are gated by ONE mechanism
+// and ONE metric (#708 round 2 finding 0).
+func shrinkGuardFires(seen map[string]bool, existing map[string]uint64) bool {
+	return len(existing) > 0 && float64(len(seen)) < 0.7*float64(len(existing))
+}
+
 // deleteIntraKeyOrphans reconciles the DB for repoKey against the freshly-parsed
 // symbol set. Non-fatal: logs a WARN on failure; increments counters on success.
 // Separated from indexRepoWithTool to reduce cognitive complexity.
@@ -706,19 +744,15 @@ func filterSymbols(
 //   - orphanKeys: pre-computed explicit orphan slice = keys in existing NOT in seen.
 //     Passed in so the caller owns the computation and the store method is pure.
 //
-// Shrink-guard: if len(seen) < 70% of len(existing) AND existing is non-empty,
-// the delete is SKIPPED and a WARN is logged. This prevents a partial parse
-// (e.g. parser error on half the files) from mass-deleting valid rows.
-// filterSymbols doc-comment: 'Do not call on a partial parse.'
+// Shrink-guard: if shrinkGuardFires(seen, existing), the delete is SKIPPED and
+// a WARN is logged. This prevents a partial parse (e.g. parser error on half
+// the files) from mass-deleting valid rows. filterSymbols doc-comment: 'Do not
+// call on a partial parse.'
 func deleteIntraKeyOrphans(
 	ctx context.Context, store *Store, repoKey string,
 	seen map[string]bool, existing map[string]uint64, orphanKeys []string,
 ) {
-	// Shrink-guard: skip if the parsed set is too small relative to the DB set.
-	// Threshold 0.7 catches accidental partial-parse mass-delete without blocking
-	// legitimate large deletions (e.g. removing 30%+ of a repo's symbols at once
-	// would require separate confirmation via a deliberate full re-parse pass).
-	if len(existing) > 0 && float64(len(seen)) < 0.7*float64(len(existing)) {
+	if shrinkGuardFires(seen, existing) {
 		slog.Warn("indexRepo: orphan-delete skipped (shrink guard)",
 			slog.String("repo", repoKey),
 			slog.Int("seen", len(seen)),

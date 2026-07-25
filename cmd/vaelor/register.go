@@ -282,6 +282,7 @@ func registerTools(ctx context.Context, server *mcp.Server, cfg Config, reg *kit
 	registerSemanticSearch(server, cfg, semDeps)
 	registerSparseBackfill(server, cfg, semDeps)
 	registerOrphanSweep(server, semDeps)
+	registerReconcilePaths(server, semDeps)
 	registerListFlows(server, graphStore, semDeps)
 	registerFindDuplicates(server, semDeps)
 	registerCodeResearch(server, cfg, deps, &semDeps)
@@ -470,6 +471,8 @@ func startZeroEmbeddingsCounterWarm(store *embeddings.Store) {
 			return
 		}
 		embeddings.WarmRepoStateAdvancedZeroEmbeddings(keys)
+		embeddings.WarmStalePathRatioGauge(keys)
+		embeddings.WarmStalePathUnmeasuredGauge(keys)
 	}()
 }
 
