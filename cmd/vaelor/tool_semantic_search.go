@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/anatolykoptev/go-kit/embed"
@@ -547,18 +548,45 @@ func finalResult(
 	if graphStaleAgeS > 0 {
 		env.GraphStaleAgeS = graphStaleAgeS
 	}
-	formatted := formatSemanticResults(input, reranked, deps.AnalyzeDeps.PathMappings)
-	// Meta footer goes on BEFORE budget shaping so a truncation cut keeps the
-	// `[truncated: …]` hint at the tail and the total stays within the
-	// requested max_bytes; the freshness footer is auxiliary and may be cut.
-	formatted = appendMetaFooter(formatted, env)
-	// Apply per-call budget override when max_bytes is set; the addTool
-	// wrapper applies the default budget otherwise (#582).
-	if input.MaxBytes > 0 {
-		formatted = mcpmeta.ShapeWithHint(formatted, budgetOverride(input.MaxBytes),
-			"narrow with language= or query=, or increase max_bytes")
+	// Progressive result-shortening ladder (#685 part 2): full → compact
+	// (drop auxiliary attrs) → counts (per-file hit counts). renderLadder
+	// owns the five invariants so this tool cannot forget one.
+	//
+	// Budget ownership: the LADDER owns the budget, not ShapeWithHint. The
+	// ladder's budget is the per-call budget (ResolveBudget(max_bytes,
+	// DefaultBudget)) — a caller passing max_bytes gets a ladder fitted to
+	// that number, not a hardcoded DefaultBudget. ShapeWithHint is REMOVED
+	// from this path: it and the ladder would both act on the same text
+	// (double-shaping). The ladder replaces ShapeWithHint's truncation-with-
+	// hint behaviour with a cheaper-but-complete rung — a better answer than
+	// a hard-truncated fragment.
+	//
+	// Double-shaping prevention: when max_bytes > 0, MarkBudgetApplied
+	// appends the budget-applied sentinel so the addTool wrapper's IsShaped
+	// check returns true and it skips re-shaping at DefaultBudget. This is
+	// critical when max_bytes > DefaultBudget (the body may be up to
+	// max_bytes > DefaultBudget, and the wrapper's Shape at DefaultBudget
+	// would truncate the tail). When max_bytes <= 0, the ladder fits to
+	// DefaultBudget and the wrapper's Shape is a no-op (text fits). The
+	// wrapper strips the marker (StripBudgetMarker) before the agent sees
+	// it. Invariant 2 holds against the SAME budget the ladder used: the
+	// ladder guarantees len(body) <= budget, and Shape(body, budget, "") is
+	// a no-op because body fits.
+	mappings := deps.AnalyzeDeps.PathMappings
+	fullRender := appendMetaFooter(formatSemanticResults(input, reranked, mappings), env)
+	compactRender := appendMetaFooter(formatSemanticResultsCompact(input, reranked, mappings), env)
+	countsRender := appendMetaFooter(formatSemanticResultsCounts(input, reranked, mappings), env)
+	ladder := mcpmeta.Ladder{
+		{Name: "full", Render: func() string { return fullRender }},
+		{Name: "no-snippet", Render: func() string { return compactRender }},
+		{Name: "counts", Render: func() string { return countsRender }},
 	}
-	return textResult(formatted), nil
+	budget := mcpmeta.ResolveBudget(input.MaxBytes, mcpmeta.DefaultBudget)
+	body := renderLadder(ladder, "semantic_search", "", budget)
+	if input.MaxBytes > 0 {
+		body = mcpmeta.MarkBudgetApplied(body)
+	}
+	return textResult(body), nil
 }
 
 // symbolNameFromResults returns the symbol name from the first result when there
@@ -624,6 +652,59 @@ func formatSemanticResults(input SemanticSearchInput, results []embeddings.Searc
 			res.PageRank = &pr
 		}
 		resp.Results.Results = append(resp.Results.Results, res)
+	}
+	return xmlMarshalFragment(resp)
+}
+
+// formatSemanticResultsCompact is ladder rung 2: file/line/symbol/distance per
+// hit, every hit listed, auxiliary attrs (pagerank/source/language) dropped.
+func formatSemanticResultsCompact(input SemanticSearchInput, results []embeddings.SearchResult, mappings []analyze.PathMapping) string {
+	resp := semanticCompactRespXML{
+		Tool:    "semantic_search",
+		Query:   input.Query,
+		Repo:    input.Repo,
+		Results: semanticCompactResults{Count: len(results)},
+	}
+	for i, r := range results {
+		resp.Results.Results = append(resp.Results.Results, semanticCompactResult{
+			Rank:     i + 1,
+			Distance: fmt.Sprintf("%.4f", r.Distance),
+			File:     reverseToHost(r.FilePath, mappings),
+			Symbol:   semanticSymbolXML{Kind: r.SymbolKind, Value: r.SymbolName},
+			Line:     r.StartLine,
+		})
+	}
+	return xmlMarshalFragment(resp)
+}
+
+// formatSemanticResultsCounts is ladder rung 3: per-file hit counts + total,
+// ordered by descending count.
+func formatSemanticResultsCounts(input SemanticSearchInput, results []embeddings.SearchResult, mappings []analyze.PathMapping) string {
+	counts := make(map[string]int, len(results))
+	order := make([]string, 0, len(results))
+	for _, r := range results {
+		host := reverseToHost(r.FilePath, mappings)
+		if _, seen := counts[host]; !seen {
+			order = append(order, host)
+		}
+		counts[host]++
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		return counts[order[i]] > counts[order[j]]
+	})
+	items := make([]semanticFileCount, len(order))
+	for i, f := range order {
+		items[i] = semanticFileCount{File: f, Count: counts[f]}
+	}
+	resp := semanticCountsRespXML{
+		Tool:  "semantic_search",
+		Query: input.Query,
+		Repo:  input.Repo,
+		Results: semanticCountsBody{
+			Count:      len(results),
+			Files:      len(order),
+			FileCounts: items,
+		},
 	}
 	return xmlMarshalFragment(resp)
 }

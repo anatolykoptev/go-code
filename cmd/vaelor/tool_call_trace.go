@@ -12,6 +12,7 @@ import (
 	"github.com/anatolykoptev/vaelor/internal/codegraph"
 	"github.com/anatolykoptev/vaelor/internal/ingest"
 	"github.com/anatolykoptev/vaelor/internal/langutil"
+	"github.com/anatolykoptev/vaelor/internal/mcpmeta"
 	"github.com/anatolykoptev/vaelor/internal/prompts"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -31,6 +32,8 @@ type xmlTrace struct {
 	ResolvedRatio         float64        `xml:"resolvedRatio,attr"`
 	Tier                  string         `xml:"tier,attr,omitempty"`
 	ProductionCallerCount int            `xml:"production_caller_count,attr,omitempty"`
+	Condensed             string         `xml:"condensed,attr,omitempty"`
+	Elided                int            `xml:"elided,attr,omitempty"`
 	Nodes                 []xmlTraceNode `xml:"node"`
 	Narrative             *xmlCDATA      `xml:"narrative,omitempty"`
 }
@@ -72,6 +75,117 @@ func convertTraceNodes(nodes []callgraph.CallChainNode) []xmlTraceNode {
 		result[i] = xn
 	}
 	return result
+}
+
+// xmlTraceCountsResponse is ladder rung 3 for call_trace: N callers/callees
+// across M files plus the immediate caller/callee list. The cheapest rendering
+// — the agent gets the blast radius summary instead of a hard-truncated tree
+// when even the depth-1 rendering overflows the budget.
+type xmlTraceCountsResponse struct {
+	XMLName xml.Name       `xml:"response"`
+	Trace   xmlTraceCounts `xml:"trace"`
+}
+
+type xmlTraceCounts struct {
+	Symbol    string         `xml:"symbol,attr"`
+	Direction string         `xml:"direction,attr"`
+	Total     int            `xml:"total,attr"`
+	Files     int            `xml:"files,attr"`
+	Nodes     []xmlTraceNode `xml:"node"`
+}
+
+// countTraceNodes counts all nodes in the tree recursively (including the
+// roots).
+func countTraceNodes(nodes []callgraph.CallChainNode) int {
+	c := 0
+	for _, n := range nodes {
+		c += 1 + countTraceNodes(n.Children)
+	}
+	return c
+}
+
+// countTraceFiles collects unique file paths from all nodes in the tree.
+func countTraceFiles(nodes []callgraph.CallChainNode, seen map[string]struct{}) {
+	for _, n := range nodes {
+		if n.Symbol != nil && n.Symbol.File != "" {
+			seen[n.Symbol.File] = struct{}{}
+		}
+		countTraceFiles(n.Children, seen)
+	}
+}
+
+// pruneTraceToDepth1 returns a copy of the tree pruned to depth 1 (root +
+// immediate children only, deeper levels dropped) and the count of elided
+// nodes (those at depth >= 2). A silently shallow tree is a wrong answer, not
+// a condensed one — the caller sets Condensed="depth-1" and Elided=N so the
+// agent knows deeper levels were dropped and how many.
+func pruneTraceToDepth1(nodes []callgraph.CallChainNode) ([]callgraph.CallChainNode, int) {
+	var elided int
+	pruned := make([]callgraph.CallChainNode, len(nodes))
+	for i, n := range nodes {
+		// Count all nodes at depth >= 2 (grandchildren and deeper).
+		for _, child := range n.Children {
+			elided += countTraceNodes(child.Children)
+		}
+		// Shallow-copy the root, keep immediate children but nil their Children.
+		rootCopy := n
+		rootCopy.Children = make([]callgraph.CallChainNode, len(n.Children))
+		for j, child := range n.Children {
+			childCopy := child
+			childCopy.Children = nil
+			rootCopy.Children[j] = childCopy
+		}
+		pruned[i] = rootCopy
+	}
+	return pruned, elided
+}
+
+// buildTraceCounts builds the counts rung data: total nodes (excluding root),
+// unique files, and the immediate children as XML nodes (depth-1 list).
+func buildTraceCounts(nodes []callgraph.CallChainNode) (total int, files int, immediate []xmlTraceNode) {
+	filesSet := make(map[string]struct{})
+	for _, root := range nodes {
+		// Immediate children become the depth-1 list.
+		for _, child := range root.Children {
+			// Count this child + all its descendants.
+			total += countTraceNodes([]callgraph.CallChainNode{child})
+		}
+		// Collect files from all nodes except the root.
+		countTraceFiles(root.Children, filesSet)
+	}
+	// Build the immediate list as shallow XML nodes (no children).
+	immediate = convertTraceNodes(pruneChildrenShallow(nodes))
+	files = len(filesSet)
+	return total, files, immediate
+}
+
+// pruneChildrenShallow returns a copy of the tree where each root's children
+// have their Children set to nil (depth-1 flat list).
+func pruneChildrenShallow(nodes []callgraph.CallChainNode) []callgraph.CallChainNode {
+	result := make([]callgraph.CallChainNode, len(nodes))
+	for i, n := range nodes {
+		rootCopy := n
+		rootCopy.Children = make([]callgraph.CallChainNode, len(n.Children))
+		for j, child := range n.Children {
+			childCopy := child
+			childCopy.Children = nil
+			rootCopy.Children[j] = childCopy
+		}
+		result[i] = rootCopy
+	}
+	return result
+}
+
+// marshalTraceXML renders a trace XML response struct as a complete XML
+// document string with the xml.Header prolog. Each rung closure in the
+// ladder uses this so every rendering is a self-consistent, parseable
+// document.
+func marshalTraceXML(v any) string {
+	data, err := xml.Marshal(v)
+	if err != nil {
+		return xmlMarshalErrorFragment(err)
+	}
+	return xml.Header + string(data)
 }
 
 // callTraceTraceFromAGE is the test seam for codegraph.TraceFromAGE. It is a
@@ -254,7 +368,15 @@ func handleCallTrace(ctx context.Context, input CallTraceInput, deps analyze.Dep
 
 	output := buildCallTraceOutput(ctx, input.Symbol, direction, result, deps, input.Compact)
 
-	resp := xmlTraceResponse{
+	// Progressive result-shortening ladder (#685 part 2): full tree →
+	// depth-1 (direct callers/callees only, states deeper levels dropped) →
+	// counts (N across M files + immediate list). renderLadder owns the
+	// five invariants. The ladder is placed AFTER the freshness gate
+	// (ensureAgeGraphOrStatus above returns a <status> envelope on a stale
+	// graph before any result exists — the ladder must not run on that
+	// path, and it doesn't: the gate returns at line ~218, well before
+	// here).
+	fullResp := xmlTraceResponse{
 		Trace: xmlTrace{
 			Symbol:                output.Symbol,
 			Direction:             output.Direction,
@@ -269,10 +391,49 @@ func handleCallTrace(ctx context.Context, input CallTraceInput, deps analyze.Dep
 		},
 	}
 	if output.Narrative != "" {
-		resp.Trace.Narrative = &xmlCDATA{Inner: wrapCDATA(output.Narrative)}
+		fullResp.Trace.Narrative = &xmlCDATA{Inner: wrapCDATA(output.Narrative)}
 	}
 
-	return xmlMarshalResult(resp, "call_trace", outputDir), nil
+	// Rung 2: depth-1 — direct callers/callees only, deeper levels dropped.
+	// MUST state that deeper levels were dropped and how many were elided
+	// (a silently shallow tree is a wrong answer, not a condensed one).
+	prunedTree, elided := pruneTraceToDepth1(output.CallTree)
+	depth1Resp := xmlTraceResponse{
+		Trace: xmlTrace{
+			Symbol:                output.Symbol,
+			Direction:             output.Direction,
+			TotalNodes:            output.Stats.TotalNodes,
+			MaxDepth:              output.Stats.MaxDepth,
+			Resolved:              output.Stats.Resolved,
+			Unresolved:            output.Stats.Unresolved,
+			ResolvedRatio:         output.Stats.ResolvedRatio,
+			Tier:                  output.Tier,
+			ProductionCallerCount: output.ProductionCallerCount,
+			Condensed:             "depth-1",
+			Elided:                elided,
+			Nodes:                 convertTraceNodes(prunedTree),
+		},
+	}
+
+	// Rung 3: counts — N callers/callees across M files + immediate list.
+	total, fileCount, immediateNodes := buildTraceCounts(output.CallTree)
+	countsResp := xmlTraceCountsResponse{
+		Trace: xmlTraceCounts{
+			Symbol:    output.Symbol,
+			Direction: output.Direction,
+			Total:     total,
+			Files:     fileCount,
+			Nodes:     immediateNodes,
+		},
+	}
+
+	ladder := mcpmeta.Ladder{
+		{Name: "full", Render: func() string { return marshalTraceXML(fullResp) }},
+		{Name: "depth-1", Render: func() string { return marshalTraceXML(depth1Resp) }},
+		{Name: "counts", Render: func() string { return marshalTraceXML(countsResp) }},
+	}
+	body := renderLadder(ladder, "call_trace", outputDir, mcpmeta.DefaultBudget)
+	return textResult(body), nil
 }
 
 // countProductionCallers returns the number of distinct DIRECT callers whose
