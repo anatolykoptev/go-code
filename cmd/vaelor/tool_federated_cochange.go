@@ -39,10 +39,10 @@ const (
 
 // FederatedCoChangeArgs is the input schema for the federated_cochange tool.
 type FederatedCoChangeArgs struct {
-	Repos       string  `json:"repos"                    jsonschema_description:"Repo pattern: 'all', a glob like 'acme-*', or a single repo name/absolute path"`
-	WindowHours int     `json:"window_hours,omitempty"   jsonschema_description:"Co-change time window in hours (default 24)"`
-	MinPairs    int     `json:"min_pairs,omitempty"      jsonschema_description:"Minimum co-occurrences to report a pair (default 2)"`
-	MinLift     float64 `json:"min_lift,omitempty"       jsonschema_description:"Optional raw-lift pre-filter floor (default 0 = no filter). Ranking is by Wilson lower bound on directional confidence — not affected by min_lift. Raise min_pairs for higher-confidence pairs."`
+	Repos       string  `json:"repos"                    jsonschema:"Repo pattern: 'all', a glob like 'acme-*', or a single repo name/absolute path"`
+	WindowHours int     `json:"window_hours,omitempty"   jsonschema:"Co-change time window in hours (default 24)"`
+	MinPairs    int     `json:"min_pairs,omitempty"      jsonschema:"Minimum co-occurrences to report a pair (default 2)"`
+	MinLift     float64 `json:"min_lift,omitempty"       jsonschema:"Optional raw-lift pre-filter floor (default 0 = no filter). Ranking is by Wilson lower bound on directional confidence — not affected by min_lift. Raise min_pairs for higher-confidence pairs."`
 }
 
 // FederatedCoChangeResult is the JSON payload returned by the federated_cochange tool.

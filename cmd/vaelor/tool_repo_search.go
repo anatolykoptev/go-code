@@ -29,9 +29,9 @@ Rank by relevance to the query. Be concise. Include GitHub URLs.`
 
 // RepoSearchInput is the input schema for the repo_search tool.
 type RepoSearchInput struct {
-	Query    string `json:"query" jsonschema_description:"What repositories to find. Supports GitHub syntax: 'language:go topic:ai', 'stars:>100'"`
-	Language string `json:"language,omitempty" jsonschema_description:"Filter by programming language"`
-	Sort     string `json:"sort,omitempty" jsonschema_description:"Sort by: stars, forks, updated"`
+	Query    string `json:"query" jsonschema:"What repositories to find. Supports GitHub syntax: 'language:go topic:ai', 'stars:>100'"`
+	Language string `json:"language,omitempty" jsonschema:"Filter by programming language"`
+	Sort     string `json:"sort,omitempty" jsonschema:"Sort by: stars, forks, updated"`
 }
 
 // repoHit holds a search result before enrichment.

@@ -13,8 +13,8 @@ import (
 
 // SiteAnalyzeInput is the input schema for the site_analyze tool.
 type SiteAnalyzeInput struct {
-	URL  string `json:"url" jsonschema_description:"Website URL to analyze (e.g. https://example.com)"`
-	Mode string `json:"mode,omitempty" jsonschema_description:"detect (tech stack only, default) or full (detect + download source maps)"`
+	URL  string `json:"url" jsonschema:"Website URL to analyze (e.g. https://example.com)"`
+	Mode string `json:"mode,omitempty" jsonschema:"detect (tech stack only, default) or full (detect + download source maps)"`
 }
 
 func registerSiteAnalyze(server *mcp.Server, cfg Config) {

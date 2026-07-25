@@ -12,9 +12,9 @@ import (
 
 // WPPluginSearchInput is the input schema for the wp_plugin_search tool.
 type WPPluginSearchInput struct {
-	Query   string `json:"query" jsonschema_description:"Search query (e.g. 'seo', 'woocommerce payment', 'cache')"`
-	PerPage int    `json:"per_page,omitempty" jsonschema_description:"Results per page (1-20, default 10)"`
-	Page    int    `json:"page,omitempty" jsonschema_description:"Page number (default 1)"`
+	Query   string `json:"query" jsonschema:"Search query (e.g. 'seo', 'woocommerce payment', 'cache')"`
+	PerPage int    `json:"per_page,omitempty" jsonschema:"Results per page (1-20, default 10)"`
+	Page    int    `json:"page,omitempty" jsonschema:"Page number (default 1)"`
 }
 
 // registerWPPluginSearch registers the wp_plugin_search MCP tool.

@@ -3,12 +3,27 @@ package main
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"time"
 
 	"github.com/anatolykoptev/vaelor/internal/argnorm"
 	"github.com/anatolykoptev/vaelor/internal/mcpmeta"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// registeredToolInput records one tool's name and the reflect.Type of its MCP
+// input struct. It is populated as a side effect of addTool — the single
+// registration seam every tool MUST go through (guarded by
+// TestNoDirectMCPServerAddTool). TestAllRegisteredToolsHaveParamDescriptions
+// iterates this slice instead of a hardcoded tool list, so the description
+// guard cannot rot the moment someone adds a tool: a new registerXxx → addTool
+// call appends here automatically.
+var registeredToolInputs []registeredToolInput
+
+type registeredToolInput struct {
+	Name string
+	In   reflect.Type
+}
 
 // addTool is the budget-aware wrapper around argnorm.AddTool (which itself
 // registers through mcpserver.AddTool and records the tool's accepted
@@ -39,6 +54,7 @@ func addTool[In any](
 	t *mcp.Tool,
 	h func(context.Context, *mcp.CallToolRequest, In) (*mcp.CallToolResult, error),
 ) {
+	registeredToolInputs = append(registeredToolInputs, registeredToolInput{Name: t.Name, In: reflect.TypeFor[In]()})
 	argnorm.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, error) {
 		t0 := time.Now()
 		res, err := h(ctx, req, in)

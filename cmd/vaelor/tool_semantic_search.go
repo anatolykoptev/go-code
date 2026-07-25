@@ -18,12 +18,12 @@ import (
 
 // SemanticSearchInput is the input schema for the semantic_search tool.
 type SemanticSearchInput struct {
-	Repo        string  `json:"repo,omitempty" jsonschema_description:"GitHub repo (owner/repo) or local path to search in. Required in practice — omitting it returns a short error naming recently-indexed repos."`
-	Query       string  `json:"query" jsonschema_description:"Natural language description of what you're looking for (e.g. 'function that validates JWT tokens', 'error handling for database connections')"`
-	Language    string  `json:"language,omitempty" jsonschema_description:"Filter by language (e.g. go, python, typescript)"`
-	TopK        int     `json:"top_k,omitempty" jsonschema_description:"Number of results (default 10, max 50)"`
-	MaxDistance float32 `json:"max_distance,omitempty" jsonschema_description:"Maximum cosine distance (0.0-1.0, default 0.75). Lower = stricter matching"`
-	MaxBytes    int     `json:"max_bytes,omitempty" jsonschema_description:"Response budget in bytes (default 8192). When the response exceeds this, the ranked head is returned with a continuation footer."`
+	Repo        string  `json:"repo,omitempty" jsonschema:"GitHub repo (owner/repo) or local path to search in. Required in practice — omitting it returns a short error naming recently-indexed repos."`
+	Query       string  `json:"query" jsonschema:"Natural language description of what you're looking for (e.g. 'function that validates JWT tokens', 'error handling for database connections')"`
+	Language    string  `json:"language,omitempty" jsonschema:"Filter by language (e.g. go, python, typescript)"`
+	TopK        int     `json:"top_k,omitempty" jsonschema:"Number of results (default 10, max 50)"`
+	MaxDistance float32 `json:"max_distance,omitempty" jsonschema:"Maximum cosine distance (0.0-1.0, default 0.75). Lower = stricter matching"`
+	MaxBytes    int     `json:"max_bytes,omitempty" jsonschema:"Response budget in bytes (default 8192). When the response exceeds this, the ranked head is returned with a continuation footer."`
 }
 
 // SemanticDeps holds dependencies for semantic search.

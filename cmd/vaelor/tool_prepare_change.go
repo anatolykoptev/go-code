@@ -17,11 +17,11 @@ import (
 
 // PrepareChangeInput is the input schema for the prepare_change tool.
 type PrepareChangeInput struct {
-	Repo     string `json:"repo" jsonschema_description:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
-	Symbol   string `json:"symbol" jsonschema_description:"Function or method name to assess change risk for"`
-	Focus    string `json:"focus,omitempty" jsonschema_description:"Subdirectory path to limit scope"`
-	Language string `json:"language,omitempty" jsonschema_description:"Limit to files of this language (e.g. go, python)"`
-	Depth    int    `json:"depth,omitempty" jsonschema_description:"Max impact traversal depth (default 5, max 10)"`
+	Repo     string `json:"repo" jsonschema:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path"`
+	Symbol   string `json:"symbol" jsonschema:"Function or method name to assess change risk for"`
+	Focus    string `json:"focus,omitempty" jsonschema:"Subdirectory path to limit scope"`
+	Language string `json:"language,omitempty" jsonschema:"Limit to files of this language (e.g. go, python)"`
+	Depth    int    `json:"depth,omitempty" jsonschema:"Max impact traversal depth (default 5, max 10)"`
 }
 
 const maxPrepareChangeDepth = 10

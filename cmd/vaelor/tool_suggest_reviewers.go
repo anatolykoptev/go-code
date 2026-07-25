@@ -35,8 +35,8 @@ const (
 
 // SuggestReviewersArgs is the input schema for the suggest_reviewers tool.
 type SuggestReviewersArgs struct {
-	Repo  string   `json:"repo"  jsonschema_description:"Repository path (canonicalized via resolveRoot)"`
-	Paths []string `json:"paths" jsonschema_description:"PR file paths to rank reviewers for"`
+	Repo  string   `json:"repo"  jsonschema:"Repository path (canonicalized via resolveRoot)"`
+	Paths []string `json:"paths" jsonschema:"PR file paths to rank reviewers for"`
 }
 
 // Suggestion is a single reviewer candidate with score and signal breakdown.

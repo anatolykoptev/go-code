@@ -14,8 +14,8 @@ import (
 // RememberGraphInsightsInput is the input schema for remember_graph_insights.
 // This tool is human-invoked only — never called by agents or routine automation.
 type RememberGraphInsightsInput struct {
-	Repo           string `json:"repo" jsonschema_description:"Repository: absolute local path or GitHub slug (owner/repo)"`
-	MaxPerTemplate int    `json:"max_per_template,omitempty" jsonschema_description:"Max findings to persist per template (default 20, max 100)"`
+	Repo           string `json:"repo" jsonschema:"Repository: absolute local path or GitHub slug (owner/repo)"`
+	MaxPerTemplate int    `json:"max_per_template,omitempty" jsonschema:"Max findings to persist per template (default 20, max 100)"`
 }
 
 const (

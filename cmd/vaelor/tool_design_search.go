@@ -12,8 +12,8 @@ import (
 
 // DesignSearchInput is the input schema for the design_search tool.
 type DesignSearchInput struct {
-	Query string `json:"query" jsonschema_description:"Natural language description of the UI you want (e.g. 'dark minimal SaaS dashboard with green accent', 'art deco gold and black luxury')"`
-	TopK  int    `json:"top_k,omitempty" jsonschema_description:"Number of results (default 5, max 20)"`
+	Query string `json:"query" jsonschema:"Natural language description of the UI you want (e.g. 'dark minimal SaaS dashboard with green accent', 'art deco gold and black luxury')"`
+	TopK  int    `json:"top_k,omitempty" jsonschema:"Number of results (default 5, max 20)"`
 }
 
 // DesignDeps holds dependencies for design_search tool.

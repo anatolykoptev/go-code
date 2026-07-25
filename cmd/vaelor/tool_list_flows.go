@@ -14,7 +14,7 @@ import (
 
 // ListFlowsInput is the input schema for the list_flows MCP tool.
 type ListFlowsInput struct {
-	Repo string `json:"repo" jsonschema_description:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
+	Repo string `json:"repo" jsonschema:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
 }
 
 // registerListFlows registers the list_flows MCP tool.
