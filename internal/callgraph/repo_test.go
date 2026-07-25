@@ -341,9 +341,12 @@ func TestTryGoTypesResolution_WarnOnFailure(t *testing.T) {
 
 	// tempdir has no go.mod — LoadPackages errors immediately on missing module
 	// file, before any context check is reached.
-	result := tryGoTypesResolution(context.Background(), dir, nil)
+	result, err := tryGoTypesResolution(context.Background(), dir, nil)
 	if result != nil {
 		t.Error("expected nil result for failing packages.Load")
+	}
+	if err == nil {
+		t.Error("expected non-nil error for failing packages.Load")
 	}
 
 	got := buf.String()
@@ -420,37 +423,43 @@ def main():
 // for the resolver-level proof that goanalysis.Resolve itself emits the edge.
 
 // TestEnrichWithTypedResolution_ColdCache_SetsWarmingAndSkipsImplements is the
-// RED test for issue #735 Part 1: on a cold go/types cache (tryGoTypesResolution
-// returns nil), EnrichWithTypedResolution must set Warming=true and must NOT
-// call ExtractGoImplements (which blocks on the same slow packages.Load that
-// already failed). Before the fix, Warming was always false and ExtractGoImplements
-// was called unconditionally, blocking the request path for up to 30s on a cold
-// repo — converting a usable tree-sitter answer into a timeout error.
+// RED test for issue #735 Part 1: when the go/packages LOAD genuinely fails
+// (tryGoTypesResolution returns (nil, err)), EnrichWithTypedResolution must set
+// Warming=true and must NOT call ExtractGoImplements (which blocks on the same
+// slow packages.Load that already failed). Before the fix, Warming was always
+// false and ExtractGoImplements was called unconditionally, blocking the request
+// path for up to 30s on a cold repo — converting a usable tree-sitter answer
+// into a timeout error.
 //
-// The repo has a go.mod with a broken replace directive so packages.Load fails
-// fast (no network, no GOCACHE warm-up needed) — tryGoTypesResolution returns nil
-// without hanging. The test then asserts the cold-path contract: Warming=true and
-// zero IMPLEMENTS edges (ExtractGoImplements was skipped).
+// The fixture is a go.mod with a syntax error: packages.Load fails fast at
+// go.mod parsing time (no network, no GOCACHE warm-up, no partial-TypeInfo
+// recovery) — tryGoTypesResolution returns (nil, err) without hanging. The test
+// then asserts the cold-path contract: Warming=true and zero IMPLEMENTS edges
+// (ExtractGoImplements was skipped).
+//
+// Round 1's fixture (broken replace + syntax-broken main.go) did NOT reliably
+// trigger a load error: go/packages still returns a package with partial
+// TypesInfo for syntax-broken .go files, so LoadPackages succeeded and the
+// case was actually the zero-edge path (now covered by
+// TestEnrichWithTypedResolution_WarmCache_ZeroCallEdges_NoWarmingButImplements).
+// The broken-go.mod fixture is the one that genuinely exercises the load-failed
+// branch.
 func TestEnrichWithTypedResolution_ColdCache_SetsWarmingAndSkipsImplements(t *testing.T) {
 	dir := t.TempDir()
 
-	// go.mod with a replace to a nonexistent local path. Combined with the
-	// syntax-broken main.go below, packages.Load cannot produce any package
-	// with TypesInfo — LoadPackages returns an error, and
-	// tryGoTypesResolution returns nil (the cold-path trigger).
-	gomod := "module example.com/cold\n\ngo 1.21\n\nrequire example.com/missing v1.0.0\n\nreplace example.com/missing => ./does-not-exist\n"
+	// go.mod with a syntax error — packages.Load fails at go.mod parse time
+	// before any type-checking, returning a hard error. This is the genuine
+	// load-failed path (tryGoTypesResolution returns (nil, err)).
+	gomod := "module example.com/cold\n\ngo 1.21\n\nthis is not valid go.mod syntax\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// main.go with a syntax error — packages.Load cannot type-check it,
-	// TypesInfo is nil, the package is excluded by LoadPackages' filter,
-	// and with zero typed packages LoadPackages returns an error.
+	// A trivially valid main.go — the load fails at go.mod parsing, so main.go
+	// content is irrelevant; it exists only so the dir is not empty.
 	src := `package main
 
-func main() {
-	this is not valid go syntax
-}
+func main() {}
 `
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
@@ -532,6 +541,79 @@ func main() {
 
 	if cg.Warming {
 		t.Error("expected Warming=false on warm cache (tryGoTypesResolution succeeded)")
+	}
+}
+
+// TestEnrichWithTypedResolution_WarmCache_ZeroCallEdges_NoWarmingButImplements
+// is the RED test for the round-3 defect on issue #735: when go/packages loads
+// successfully but goanalysis.Resolve produces ZERO typed call edges (a Go
+// module with an interface, a concrete type that satisfies it, and NO function
+// calls), EnrichWithTypedResolution must:
+//
+//   - NOT set cg.Warming — nothing is warming; the load already succeeded. The
+//     background warmGoTypesCache would re-run the same resolution, get zero
+//     edges again, and pin Warming=true for the whole cache TTL (the #709
+//     failure reintroduced here).
+//   - STILL call ExtractGoImplements — IMPLEMENTS enrichment shares the same
+//     CachedLoadPackages and is cheap on a warm load. Skipping it (round-1's
+//     single-nil-return path) silently drops issue #467's whole feature on any
+//     Go repo that happens to have zero typed CALL edges.
+//
+// Real fixture (no mock): a tiny Go module in t.TempDir() with an interface and
+// a concrete type satisfying it, and no function calls at all. go/packages loads
+// it cleanly, goanalysis.Resolve yields zero typed call edges, and
+// goanalysis.ComputeSatisfactions yields a genuine Hello→Greeter IMPLEMENTS
+// edge — exercising the exact path rather than simulating it.
+func TestEnrichWithTypedResolution_WarmCache_ZeroCallEdges_NoWarmingButImplements(t *testing.T) {
+	dir := t.TempDir()
+
+	gomod := "module example.com/zeroedges\n\ngo 1.22\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// No function calls anywhere — goanalysis.Resolve returns zero typed call
+	// edges. Hello satisfies Greeter structurally — ComputeSatisfactions
+	// produces a Hello→Greeter IMPLEMENTS relationship.
+	src := `package main
+
+type Greeter interface {
+	Greet() string
+}
+
+type Hello struct{}
+
+func (h Hello) Greet() string { return "hello" }
+
+func main() {}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+
+	base := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic",
+		Backend: BackendTreeSitter,
+	}
+
+	cg := EnrichWithTypedResolution(context.Background(), dir, base, base.Symbols, nil)
+
+	if cg.Warming {
+		t.Error("expected Warming=false on warm load with zero typed call edges (load succeeded, nothing is warming)")
+	}
+
+	var hasImplements bool
+	for _, rel := range cg.TypeRels {
+		if rel.Kind == parser.RelImplements {
+			hasImplements = true
+			break
+		}
+	}
+	if !hasImplements {
+		t.Error("expected at least one IMPLEMENTS edge on warm-zero-edge path (ExtractGoImplements must run); TypeRels is empty")
 	}
 }
 

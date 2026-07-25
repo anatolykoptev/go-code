@@ -150,31 +150,11 @@ func EnrichWithTypedResolution(ctx context.Context, root string, base *CallGraph
 
 	if goanalysis.HasGoModule(root) {
 		warmCtx, warmCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		typedCG := tryGoTypesResolution(warmCtx, root, symbols)
+		typedCG, loadErr := tryGoTypesResolution(warmCtx, root, symbols)
 		warmCancel()
-		if typedCG != nil {
-			cg = MergeCallGraphs(cg, typedCG)
-			cg.Tier = "enhanced"
-			cg.Backend = BackendGoTypes
-
-			// Go IMPLEMENTS enrichment: tree-sitter cannot see structural interface
-			// satisfaction (no `implements` keyword), so cg.TypeRels from parsing
-			// carries only embedding (INHERITS) edges for Go. Compute (type→interface)
-			// satisfaction via go/types and append it as RelImplements relationships.
-			// Both call_trace (via BuildFromRepo) and code_graph (via
-			// buildAGECallGraph) call this seam, so both get IMPLEMENTS edges now.
-			// Non-fatal and bounded: on go.mod-absent / load-failure / timeout this
-			// returns nil. See issue #467.
-			//
-			// Only run when CALLS resolution succeeded — both share the same
-			// CachedLoadPackages, so if CALLS got a warm cache hit, IMPLEMENTS
-			// will too (fast). On a cold cache where CALLS failed, IMPLEMENTS
-			// would join the same slow singleflight load and block for up to 30s
-			// (issue #735) — skip it and let the background warm handle it.
-			cg.TypeRels = append(cg.TypeRels, ExtractGoImplements(ctx, root)...)
-		} else {
-			// Cold cache: go/types CALLS enrichment failed (tryGoTypesResolution
-			// returned nil). The background warm (warmGoTypesCache in
+		if loadErr != nil {
+			// Cold cache: the go/packages LOAD failed (tryGoTypesResolution
+			// returned (nil, err)). The background warm (warmGoTypesCache in
 			// BuildFromRepo) is running and will upgrade the cached entry; a
 			// retry will return the enhanced tier. Mark the graph so callers can
 			// surface a "type-aware enrichment is warming, retry for the
@@ -182,6 +162,24 @@ func EnrichWithTypedResolution(ctx context.Context, root string, base *CallGraph
 			// would block on the same slow packages.Load that already failed,
 			// burning the request's remaining deadline (issue #735).
 			cg.Warming = true
+		} else {
+			// Load succeeded (with or without typed call edges). In either case
+			// ExtractGoImplements is cheap: it shares the same CachedLoadPackages
+			// the load just warmed, so it cannot block on a cold NeedDeps load
+			// here. Running it unconditionally on the success path restores the
+			// pre-round-1 behaviour for the zero-edge case (a Go module with only
+			// type declarations and no function calls) — round 1's single
+			// nil-return silently dropped IMPLEMENTS on that case, regressing
+			// issue #467's whole feature.
+			if typedCG != nil {
+				cg = MergeCallGraphs(cg, typedCG)
+				cg.Tier = "enhanced"
+				cg.Backend = BackendGoTypes
+			}
+			// When typedCG is nil but loadErr is nil, the load succeeded with
+			// zero typed CALL edges — Tier stays "basic" for CALLS (honest), and
+			// IMPLEMENTS enrichment still runs below.
+			cg.TypeRels = append(cg.TypeRels, ExtractGoImplements(ctx, root)...)
 		}
 	}
 
@@ -198,25 +196,41 @@ func EnrichWithTypedResolution(ctx context.Context, root string, base *CallGraph
 }
 
 // tryGoTypesResolution attempts to load Go packages and resolve typed call
-// edges. Returns nil on any failure — callers fall back to tree-sitter-only
-// graph. On failure, bumps gocode_callgraph_gotypes_fallback_total{reason}
-// so the degradation rate is visible without requiring operators to grep
-// logs. Routes through goanalysis.CachedLoadPackages so a load already
-// warmed by ExtractGoImplements (IMPLEMENTS, callgraph/satisfaction.go)
-// against the same root within the cache TTL is reused here instead of
-// re-run.
-func tryGoTypesResolution(ctx context.Context, root string, tsSymbols []*parser.Symbol) *CallGraph {
+// edges. The return distinguishes two nil-cg cases that round 1 conflated:
+//
+//   - (nil, err): the go/packages LOAD failed (cold GOCACHE, missing/unbuildable
+//     deps, timeout). Genuine cold path — callers must set Warming and skip
+//     ExtractGoImplements (which would block on the same slow load, issue #735).
+//     Bumps gocode_callgraph_gotypes_fallback_total{reason="deadline"|"load_error"}.
+//
+//   - (nil, nil): the load SUCCEEDED but goanalysis.Resolve produced zero typed
+//     call edges (e.g. a Go module with only type declarations and no function
+//     calls). Nothing is warming — the load already succeeded — so callers must
+//     NOT set Warming, and SHOULD still call ExtractGoImplements (it shares the
+//     same CachedLoadPackages and is cheap on a warm load; skipping it silently
+//     drops issue #467's IMPLEMENTS feature). Bumps
+//     gocode_callgraph_gotypes_fallback_total{reason="no_edges"} so this case
+//     is no longer invisible.
+//
+//   - (cg, nil): load succeeded with typed call edges; callers merge and mark
+//     the enhanced tier.
+//
+// Routes through goanalysis.CachedLoadPackages so a load already warmed by
+// ExtractGoImplements (IMPLEMENTS, callgraph/satisfaction.go) against the same
+// root within the cache TTL is reused here instead of re-run.
+func tryGoTypesResolution(ctx context.Context, root string, tsSymbols []*parser.Symbol) (*CallGraph, error) {
 	lr, err := goanalysis.CachedLoadPackages(ctx, root)
 	if err != nil {
 		recordGotypesFallback(err)
 		slog.Warn("go/packages load failed; falling back to tree-sitter", "err", err)
-		return nil
+		return nil, err
 	}
 	typedEdges := goanalysis.Resolve(lr.Packages)
 	if len(typedEdges) == 0 {
-		return nil
+		recordGotypesNoEdges()
+		return nil, nil
 	}
-	return ConvertToCallGraph(typedEdges, tsSymbols)
+	return ConvertToCallGraph(typedEdges, tsSymbols), nil
 }
 
 // buildUsesIndex resolves Astro template refs from all parse results and returns
@@ -290,20 +304,28 @@ func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 	// patient, now-warm-GOCACHE retry isn't short-circuited by the stale
 	// cold-cache failure instead of actually re-running the load.
 	goanalysis.InvalidateCachedLoad(root)
-	typedCG := tryGoTypesResolution(ctx, root, symbols)
-	if typedCG == nil {
-		slog.Error("go/types: background warm failed — cache stays at basic tier", "root", root)
+	typedCG, err := tryGoTypesResolution(ctx, root, symbols)
+	if err != nil {
+		slog.Error("go/types: background warm failed — cache stays at basic tier", "root", root, "err", err)
 		recordBackgroundWarm("failed")
 		return
 	}
 
-	// Upgrade existing cache entry to enhanced tier.
-	if cached, ok := cgCache.get(cacheKey, root); ok {
-		enhanced := MergeCallGraphs(cached, typedCG)
-		enhanced.Tier = "enhanced"
-		enhanced.Backend = BackendGoTypes
-		cgCache.set(cacheKey, enhanced, root)
+	// typedCG may be nil with err == nil: the load succeeded but produced
+	// zero typed call edges. That is a successful warm, not a failure — there
+	// is simply nothing to merge. IMPLEMENTS edges were already added on the
+	// synchronous request path (EnrichWithTypedResolution runs
+	// ExtractGoImplements on the load-succeeded branch), so the cached entry
+	// already carries them and needs no upgrade here.
+	if typedCG != nil {
+		// Upgrade existing cache entry to enhanced tier.
+		if cached, ok := cgCache.get(cacheKey, root); ok {
+			enhanced := MergeCallGraphs(cached, typedCG)
+			enhanced.Tier = "enhanced"
+			enhanced.Backend = BackendGoTypes
+			cgCache.set(cacheKey, enhanced, root)
+		}
 	}
-	slog.Info("go/types: GOCACHE warmed, cache upgraded to enhanced", "root", root)
+	slog.Info("go/types: GOCACHE warmed", "root", root)
 	recordBackgroundWarm("completed")
 }
