@@ -421,14 +421,20 @@ func (p *Pipeline) checkSameSHAFastPath(ctx context.Context, repoKey, root, curr
 	case embCount > 0:
 		slog.Debug("indexRepo: skip — main branch unchanged",
 			slog.String("repo", repoKey), slog.String("sha", shortSHA(currentSHA)))
-		// #711 + #714: dry-run path-existence reconciliation on the fast
-		// path. The gauge is process-local and warmed to 0 at boot, so
+		// #711 + #714 + #720: dry-run path-existence reconciliation on the
+		// fast path. The gauge is process-local and warmed to 0 at boot, so
 		// without this a dormant contaminated repo (SHA unchanged, stale
 		// paths present) reads ratio=0 — verified-clean — after every
 		// restart. The dry-run refreshes gocode_index_stale_path_ratio
 		// from the source_path recorded in code_repo_state and deletes
 		// NOTHING. The existing post-parse DELETING reconciliation stays
 		// where it is, still gated by the shrink guard (#710 invariant).
+		//
+		// #720: this call goes through the shared seam runFastPathDryRunReconcile,
+		// which is also called by IncrementalSync's same-SHA branch. The boot
+		// autoindex calls IncrementalSync (not IndexRepo), so the reconcile
+		// MUST live in the shared helper — not only here — or 72/77 repos
+		// skip without ever reconciling (the v1.59.12 regression).
 		//
 		// Dry-run is safe by construction: ReconcileRepoPaths(dryRun=true)
 		// returns before the DELETE statement. No new safety argument
@@ -437,7 +443,7 @@ func (p *Pipeline) checkSameSHAFastPath(ctx context.Context, repoKey, root, curr
 		// Cost: one GROUP BY (ListFilePathCounts, indexed by repo_key) +
 		// one os.Stat per distinct file_path (~1000 for the largest repo).
 		// Measured: see TestFastPath_DryRunReconcile_Latency.
-		p.runFastPathDryRunReconcile(ctx, repoKey)
+		p.runFastPathDryRunReconcile(ctx, repoKey, root)
 		if setErr := p.writeRepoState(ctx, repoKey, currentSHA, root); setErr != nil {
 			recordRepoStateWriteFailure(repoKey, "indexRepo:same-sha", setErr)
 		}
@@ -462,18 +468,31 @@ func (p *Pipeline) checkSameSHAFastPath(ctx context.Context, repoKey, root, curr
 }
 
 // runFastPathDryRunReconcile runs a DRY-RUN path-existence reconciliation
-// for repoKey using the source_path recorded in code_repo_state. Called on
-// the same-SHA fast path so the gauge survives restarts (#711).
+// for repoKey using the three-way root resolution (#714 + #720):
+//  1. recorded source_path non-empty ⇒ reconcile against it (dryRun=true)
+//  2. source_path empty + caller root non-empty ⇒ reconcile against root
+//     (dryRun=true), backfill source_path=root (self-heal pathless keys)
+//  3. both empty ⇒ ReconcileRepoPaths takes the source_path_empty skip
+//     branch and sets unmeasured{reason="source_path_empty"}=1
+//
+// This is the SINGLE shared seam for same-SHA fast-path reconciliation.
+// Both checkSameSHAFastPath (IndexRepo) and IncrementalSync's same-SHA
+// branch call this helper — the reconcile + backfill calls live HERE, not
+// duplicated at each call site, so a future same-SHA caller that uses this
+// helper gets both for free and CANNOT bypass them (#720: the previous
+// design added the reconcile to checkSameSHAFastPath only, but the boot
+// autoindex goes through IncrementalSync, which never called
+// checkSameSHAFastPath, so 72/77 repos skipped without ever reconciling).
 //
 // Dry-run deletes nothing — ReconcileRepoPaths(dryRun=true) returns before
-// the DELETE statement. The source_path is resolved from STATE (not the
-// caller's root) so a pathless key (empty source_path) takes the
-// source_path_empty skip branch and sets unmeasured{reason="source_path_empty"}=1
-// instead of being reconciled against an unrecorded root (#714).
+// the DELETE statement. The backfill is UPDATE-only
+// (BackfillRepoSourcePath never INSERTs — preserves the
+// compensate-first-index-orphan guard) and carries a WHERE guard that never
+// clobbers a non-empty value.
 //
 // Non-fatal: a lookup or reconciliation error is logged and swallowed so it
 // never blocks the fast path.
-func (p *Pipeline) runFastPathDryRunReconcile(ctx context.Context, repoKey string) {
+func (p *Pipeline) runFastPathDryRunReconcile(ctx context.Context, repoKey, root string) {
 	if p.reconcilePaths == nil {
 		return
 	}
@@ -483,9 +502,30 @@ func (p *Pipeline) runFastPathDryRunReconcile(ctx context.Context, repoKey strin
 			slog.String("repo", repoKey), slog.Any("error", spErr))
 		return
 	}
-	if _, rErr := p.reconcilePaths(ctx, repoKey, sourcePath, true); rErr != nil {
+	// Three-way root resolution, mirroring the post-parse hook in
+	// indexRepoWithTool (pipeline.go ~line 663) but with dryRun=true.
+	reconcileRoot := sourcePath
+	usedRootFallback := false
+	if reconcileRoot == "" && root != "" {
+		reconcileRoot = root
+		usedRootFallback = true
+	}
+	if _, rErr := p.reconcilePaths(ctx, repoKey, reconcileRoot, true); rErr != nil {
 		slog.Warn("indexRepo: fast-path dry-run reconciliation failed (non-fatal)",
 			slog.String("repo", repoKey), slog.Any("error", rErr))
+		return
+	}
+	// Self-heal: backfill source_path when we reconciled against the
+	// caller's root (state was pathless). This is the ONLY way a pathless
+	// key whose SHA is unchanged (72/77 repos on v1.59.12) can reach the
+	// backfill — the full index path is unreachable when the SHA matches
+	// (#720). Safe: BackfillRepoSourcePath only UPDATEs existing rows
+	// (never INSERTs) and never clobbers a non-empty value.
+	if usedRootFallback && p.backfillSourcePath != nil {
+		if bfErr := p.backfillSourcePath(ctx, repoKey, root); bfErr != nil {
+			slog.Warn("indexRepo: fast-path source_path backfill failed (non-fatal)",
+				slog.String("repo", repoKey), slog.Any("error", bfErr))
+		}
 	}
 }
 
