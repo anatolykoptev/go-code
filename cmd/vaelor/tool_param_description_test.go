@@ -138,6 +138,7 @@ func TestAllRegisteredToolsHaveParamDescriptions(t *testing.T) {
 		{"code_graph", reflect.TypeFor[CodeGraphInput]()},
 		{"find_duplicates", reflect.TypeFor[FindDuplicatesInput]()},
 		{"orphan_sweep", reflect.TypeFor[OrphanSweepInput]()},
+		{"reconcile_paths", reflect.TypeFor[ReconcilePathsInput]()},
 		{"list_flows", reflect.TypeFor[ListFlowsInput]()},
 		{"sparse_backfill", reflect.TypeFor[SparseBackfillInput]()},
 		{"remember_graph_insights", reflect.TypeFor[RememberGraphInsightsInput]()},

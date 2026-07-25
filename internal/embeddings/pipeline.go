@@ -66,16 +66,17 @@ const repoStateRetryBackoff = 150 * time.Millisecond
 type Pipeline struct {
 	client            *embed.Client
 	store             *Store
-	embedModel        string                                                           // active embedding model name; stored alongside head_sha for cross-model reindex detection
-	writeRepoState    func(ctx context.Context, repoKey, sha, sourcePath string) error // defaults to a closure over store.SetRepoStateWithPath + embedModel; injectable for testing
-	writeSparsesBatch func(ctx context.Context, rows []SparseUpdate) error             // defaults to store.UpdateSparseEmbeddingsBatch; injectable for testing
-	deleteRepo        func(ctx context.Context, repoKey string) error                  // defaults to store.DeleteRepo; injectable for testing (compensating rollback)
-	progress          sync.Map                                                         // repoKey -> *indexProgress
-	fileCache         *kitcache.Cache                                                  // optional per-file symbol-entry cache; nil disables.
-	sparseClient      sparse.SparseEmbedder                                            // optional SPLADE embedder; nil disables sparse indexing (cold-path: byte-identical to dense-only)
-	sparseMaxBatch    int                                                              // per-request cap for sparse server (EMBED_MAX_INPUT_ARRAY); defaults to sparseServerMaxDocs
-	indexBudget       time.Duration                                                    // per-goroutine timeout for IndexRepoAsyncWithTool; 0 uses defaultIndexBudget
-	expandSymbolKinds bool                                                             // #664: gate macro/module/type-alias extraction + LOI embed text (EXPAND_SYMBOL_KINDS, default false)
+	embedModel        string                                                                                       // active embedding model name; stored alongside head_sha for cross-model reindex detection
+	writeRepoState    func(ctx context.Context, repoKey, sha, sourcePath string) error                             // defaults to a closure over store.SetRepoStateWithPath + embedModel; injectable for testing
+	writeSparsesBatch func(ctx context.Context, rows []SparseUpdate) error                                         // defaults to store.UpdateSparseEmbeddingsBatch; injectable for testing
+	deleteRepo        func(ctx context.Context, repoKey string) error                                              // defaults to store.DeleteRepo; injectable for testing (compensating rollback)
+	reconcilePaths    func(ctx context.Context, repoKey, sourcePath string, dryRun bool) (*ReconcileResult, error) // defaults to store.ReconcileRepoPaths; injectable for testing (#708 path-existence reconciliation hook)
+	progress          sync.Map                                                                                     // repoKey -> *indexProgress
+	fileCache         *kitcache.Cache                                                                              // optional per-file symbol-entry cache; nil disables.
+	sparseClient      sparse.SparseEmbedder                                                                        // optional SPLADE embedder; nil disables sparse indexing (cold-path: byte-identical to dense-only)
+	sparseMaxBatch    int                                                                                          // per-request cap for sparse server (EMBED_MAX_INPUT_ARRAY); defaults to sparseServerMaxDocs
+	indexBudget       time.Duration                                                                                // per-goroutine timeout for IndexRepoAsyncWithTool; 0 uses defaultIndexBudget
+	expandSymbolKinds bool                                                                                         // #664: gate macro/module/type-alias extraction + LOI embed text (EXPAND_SYMBOL_KINDS, default false)
 }
 
 // NewPipeline creates a Pipeline backed by the given client and store.
@@ -94,6 +95,7 @@ func NewPipeline(client *embed.Client, store *Store, model string, opts ...Pipel
 		embedModel:        model,
 		writeSparsesBatch: store.UpdateSparseEmbeddingsBatch,
 		deleteRepo:        store.DeleteRepo,
+		reconcilePaths:    store.ReconcileRepoPaths,
 	}
 	// writeRepoState closes over model so the injectable fn keeps a (ctx, repoKey, sha)
 	// signature (no model param) — avoids a breaking change in test injectors.
@@ -508,6 +510,25 @@ func (p *Pipeline) compensateFirstIndexOrphan(ctx context.Context, repoKey, stag
 func (p *Pipeline) indexRepoWithTool(
 	ctx context.Context, tool, repoKey, root string, prog *indexProgress,
 ) (*IndexResult, error) {
+	// Path-existence reconciliation (#708): delete rows under this repo_key
+	// whose file_path does not resolve under the repo root. Runs on EVERY
+	// index pass — including the same-SHA fast path below — so a rename
+	// self-heals on the next index rather than needing an operator. The
+	// intra-key orphan reconciliation (deleteIntraKeyOrphans) only runs on
+	// the full-walk path and only covers per-symbol cleanup; it cannot catch
+	// a file_path that belongs to a different project sharing the same
+	// repo_key (the FNV(path) rename collision at the heart of #708).
+	//
+	// Non-fatal: a reconciliation error is logged and swallowed so it never
+	// blocks indexing. The root-missing guard inside ReconcileRepoPaths
+	// ensures a mount blip deletes nothing.
+	if p.reconcilePaths != nil && root != "" {
+		if _, rErr := p.reconcilePaths(ctx, repoKey, root, false); rErr != nil {
+			slog.Warn("indexRepo: path reconciliation failed (non-fatal)",
+				slog.String("repo", repoKey), slog.Any("error", rErr))
+		}
+	}
+
 	// Fast path: skip the entire parse + embed cycle when the repo's main
 	// branch has not moved since the last successful index. Cuts boot-time
 	// embed-server load from "48 repos × N symbols" to zero for unchanged
