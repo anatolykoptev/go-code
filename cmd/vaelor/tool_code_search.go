@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/anatolykoptev/vaelor/internal/analyze"
@@ -169,7 +170,25 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 	if sha := deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)); sha != "" {
 		env = mcpmeta.WithFreshness(env, root, sha)
 	}
-	return metaXMLMarshalResult(formatCodeSearchXML(input, matches, deps.PathMappings), "code_search", outputDir, env), nil
+	// Progressive result-shortening ladder (#685): try the full result with
+	// context, then matches without context, then a per-file count summary.
+	// PickFitting returns the first rendering that fits DefaultBudget; each
+	// rung is a complete, parseable XML envelope so the agent never receives
+	// a hard-truncated mid-document fragment. The addTool wrapper's Shape is
+	// then a no-op (the body already fits the budget).
+	mappings := deps.PathMappings
+	ladder := mcpmeta.Ladder{
+		{Name: "full", Render: func() string { return marshalSearchXML(formatCodeSearchXML(input, matches, mappings), env) }},
+		{Name: "no-context", Render: func() string { return marshalSearchXML(formatCodeSearchXMLNoContext(input, matches, mappings), env) }},
+		{Name: "counts", Render: func() string { return marshalSearchXML(formatCodeSearchXMLSummary(input, matches, mappings), env) }},
+	}
+	body := mcpmeta.PickFitting(ladder, mcpmeta.DefaultBudget)
+	if body == "" {
+		// Empty ladder result only happens on zero matches (all rungs render
+		// the same empty envelope) — fall back to the full rendering.
+		body = ladder[0].Render()
+	}
+	return textResult(body), nil
 }
 
 // grepSearch runs grep via ox-codes with fallback to Go codesearch.
@@ -320,4 +339,94 @@ func formatCodeSearchXML(input CodeSearchInput, matches []codesearch.SearchMatch
 		resp.Search.Items[i] = item
 	}
 	return resp
+}
+
+// formatCodeSearchXMLNoContext builds the same XML envelope as
+// formatCodeSearchXML but drops the per-match <ctx> context lines — the
+// second rung of the progressive-shortening ladder. The match line itself
+// (file, line, text) is preserved so the agent still sees every hit.
+func formatCodeSearchXMLNoContext(input CodeSearchInput, matches []codesearch.SearchMatch, mappings []analyze.PathMapping) xmlSearchResponse {
+	resp := xmlSearchResponse{
+		Search: xmlSearch{
+			Pattern: input.Pattern,
+			IsRegex: input.IsRegex,
+			Matches: len(matches),
+			Items:   make([]xmlSearchMatch, len(matches)),
+		},
+	}
+	for i, m := range matches {
+		resp.Search.Items[i] = xmlSearchMatch{
+			File: reverseToHost(m.File, mappings),
+			Line: m.Line,
+			Text: xmlCDATA{Inner: wrapCDATA(m.Text)},
+		}
+	}
+	return resp
+}
+
+// xmlSearchSummaryResponse is the third (cheapest) ladder rung: per-file
+// match counts plus the total. It is a complete, parseable XML envelope on
+// its own — the agent gets "47 matches across 6 files" instead of a
+// hard-truncated fragment when even the no-context rendering overflows the
+// budget.
+type xmlSearchSummaryResponse struct {
+	XMLName xml.Name         `xml:"response"`
+	Search  xmlSearchSummary `xml:"search"`
+}
+
+type xmlSearchSummary struct {
+	Pattern string         `xml:"pattern,attr"`
+	IsRegex bool           `xml:"isRegex,attr"`
+	Matches int            `xml:"matches,attr"`
+	Files   int            `xml:"files,attr"`
+	Counts  []xmlFileCount `xml:"file"`
+}
+
+type xmlFileCount struct {
+	File  string `xml:"file,attr"`
+	Count int    `xml:"count,attr"`
+}
+
+// formatCodeSearchXMLSummary builds the per-file count summary envelope.
+// Files are ordered by descending match count (the same density ranking the
+// full result uses), so the hottest files surface first.
+func formatCodeSearchXMLSummary(input CodeSearchInput, matches []codesearch.SearchMatch, mappings []analyze.PathMapping) xmlSearchSummaryResponse {
+	counts := make(map[string]int, len(matches))
+	order := make([]string, 0, len(matches))
+	for _, m := range matches {
+		host := reverseToHost(m.File, mappings)
+		if _, seen := counts[host]; !seen {
+			order = append(order, host)
+		}
+		counts[host]++
+	}
+	// Stable sort by descending count, preserving first-seen order for ties.
+	sort.SliceStable(order, func(i, j int) bool {
+		return counts[order[i]] > counts[order[j]]
+	})
+	items := make([]xmlFileCount, len(order))
+	for i, f := range order {
+		items[i] = xmlFileCount{File: f, Count: counts[f]}
+	}
+	return xmlSearchSummaryResponse{
+		Search: xmlSearchSummary{
+			Pattern: input.Pattern,
+			IsRegex: input.IsRegex,
+			Matches: len(matches),
+			Files:   len(order),
+			Counts:  items,
+		},
+	}
+}
+
+// marshalSearchXML renders a code_search XML response struct (any of the
+// ladder rung shapes) as a complete XML document string with the xml.Header
+// prolog and the meta envelope footer. Each rung closure in the ladder uses
+// this so every rendering is a self-consistent, parseable document.
+func marshalSearchXML(v any, env mcpmeta.Envelope) string {
+	data, err := xml.Marshal(v)
+	if err != nil {
+		return xmlMarshalErrorFragment(err)
+	}
+	return appendMetaFooter(xml.Header+string(data), env)
 }
