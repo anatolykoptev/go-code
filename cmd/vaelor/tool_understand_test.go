@@ -144,7 +144,7 @@ func TestUnderstand_ColdGraph_ReturnsBuildingStatus(t *testing.T) {
 	deps := analyze.Deps{LocalRepoDirs: []string{checkouts}}
 	graphStore := &codegraph.Store{}
 
-	res, err := handleUnderstand(context.Background(), input, deps, nil, graphStore)
+	res, err := handleUnderstand(context.Background(), input, deps, nil, graphStore, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestUnderstand_ColdLocalGraph_DoesNotGate(t *testing.T) {
 	// and a nil store must not be dereferenced on the BuildFromRepo path.
 	var graphStore *codegraph.Store
 
-	res, err := handleUnderstand(context.Background(), input, deps, nil, graphStore)
+	res, err := handleUnderstand(context.Background(), input, deps, nil, graphStore, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
