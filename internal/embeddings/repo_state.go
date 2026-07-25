@@ -150,6 +150,53 @@ func (s *Store) SetRepoStateWithPath(ctx context.Context, repoKey, sha, model, s
 	return err
 }
 
+// BackfillRepoSourcePath sets source_path for repoKey ONLY when a row already
+// exists AND its current source_path is empty (NULL or empty string). Used by
+// the index-pass reconciliation hook (#714 round 2) to self-heal pathless
+// keys: when a pathless key (state row present, source_path empty) is indexed
+// with a non-empty root (provably corresponding to the key by FNV
+// construction — every call site computes repoKey = FNV-32a(root)), the root
+// is backfilled so the key stops being pathless and becomes reconcilable on
+// subsequent passes without needing the root fallback.
+//
+// Does NOT INSERT a new row — only UPDATEs an existing one. This is critical
+// for the first-index compensate-orphan guard: compensateFirstIndexOrphan
+// (pipeline.go) checks RepoStateExists and skips the rollback when a state
+// row is present. If the backfill INSERTed a row on a first index, that row
+// would defeat the guard and leave partial embeddings un-rolled-back on an
+// embedChunks failure (orphan). By updating only, a first index (no row) is
+// a no-op: writeRepoState creates the row with source_path=root on success,
+// and the compensate path still works when embedChunks fails.
+//
+// Safety:
+//   - Never clobbers a non-empty source_path: the WHERE clause
+//     (source_path IS NULL OR source_path = ”) ensures a concurrent indexer
+//     that already wrote a real source_path wins and our update is a no-op.
+//   - Does NOT touch head_sha, embed_model, or indexed_at: only source_path
+//     is SET, so a pre-existing row's SHA/model survive.
+//
+// Ordering vs writeRepoState: the backfill runs in the reconcile hook (before
+// embedChunks and before writeRepoState). Both write source_path = root, so
+// there is no contradiction. If writeRepoState later fails, the backfilled
+// row has source_path set but a stale head_sha — the same state as a
+// swallowed writeRepoState failure on a re-index (existing behavior, not an
+// orphan).
+func (s *Store) BackfillRepoSourcePath(ctx context.Context, repoKey, sourcePath string) error {
+	if sourcePath == "" {
+		return nil
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE public.code_repo_state
+		     SET source_path = $2
+		     WHERE repo_key = $1
+		       AND (source_path IS NULL OR source_path = '')`,
+		repoKey, sourcePath)
+	return err
+}
+
 // ListRepoKeys returns every repo_key present in code_repo_state — the set of
 // repos go-code has indexed at least once. Used at boot to pre-touch
 // gocode_repo_state_advanced_with_zero_embeddings_total{repo} for known repos
