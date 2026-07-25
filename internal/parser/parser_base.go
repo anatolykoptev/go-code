@@ -104,7 +104,7 @@ func mustCompileQuery(src []byte, lang *sitter.Language, name string) *sitter.Qu
 // (parserBase.Parse, ExtractCalls, scriptRegionCalls, markupExprReparse,
 // ExtractRelationships, collectRuneSymbols) that each repeated the same
 // NewParser -> SetLanguage -> ParseCtx -> defer-close sequence — pure plumbing
-// consolidation, zero behavior change.
+// consolidation with optional parser reuse. Parse output is unchanged.
 //
 // If ps is non-nil, it is reused and the caller owns its lifecycle (closeFn
 // only closes the tree). If ps is nil, parseTree creates a parser and closeFn

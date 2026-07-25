@@ -78,7 +78,7 @@ func (h *typescriptHandler) ParseWithCalls(path string, src []byte, opts ParseOp
 // entry points can never diverge.
 func (h *typescriptHandler) finalizeSymbols(result *ParseResult, path string, src []byte, opts ParseOpts) {
 	if strings.HasSuffix(path, ".svelte.ts") || strings.HasSuffix(path, ".svelte.js") {
-		result.Symbols = append(result.Symbols, collectRuneSymbols(src, path)...)
+		result.Symbols = append(result.Symbols, collectRuneSymbols(src, path, opts.Parser)...)
 	}
 	applyDetectedSymbolLanguage(result, path, opts)
 }

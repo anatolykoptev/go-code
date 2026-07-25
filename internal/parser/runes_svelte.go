@@ -3,6 +3,8 @@ package parser
 import (
 	"fmt"
 
+	sitter "github.com/smacker/go-tree-sitter"
+
 	"github.com/anatolykoptev/vaelor/internal/parser/preproc"
 )
 
@@ -11,7 +13,7 @@ import (
 // Used for .svelte.ts/.svelte.js files where the source is the whole file (see
 // typescriptHandler.Parse). The in-component .svelte path parses vs.Code only
 // ONCE (parseSvelteWithRunes) and does not go through this helper.
-func collectRuneSymbols(src []byte, path string) []*Symbol {
+func collectRuneSymbols(src []byte, path string, ps *sitter.Parser) []*Symbol {
 	if len(src) == 0 {
 		return nil
 	}
@@ -19,7 +21,7 @@ func collectRuneSymbols(src []byte, path string) []*Symbol {
 	if caps.SitterLanguage == nil {
 		return nil
 	}
-	root, closeTree, err := parseTree(caps.SitterLanguage, src, nil)
+	root, closeTree, err := parseTree(caps.SitterLanguage, src, ps)
 	if err != nil {
 		return nil
 	}
@@ -57,7 +59,7 @@ func parseSvelteWithRunes(path string, vs *preproc.VirtualSource, lang string, o
 		return result, nil
 	}
 
-	root, closeTree, err := parseTree(base.caps.SitterLanguage, vs.Code, nil)
+	root, closeTree, err := parseTree(base.caps.SitterLanguage, vs.Code, opts.Parser)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
