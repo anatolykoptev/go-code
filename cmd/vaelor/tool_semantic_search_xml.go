@@ -52,6 +52,67 @@ type semanticSymbolXML struct {
 	Value string `xml:",chardata"`
 }
 
+// --- ladder rung 2 (no-snippet / compact) ---
+//
+// Drops the auxiliary attrs (pagerank, source, language) keeping
+// file/line/symbol/distance per hit. Every hit is still listed — the agent
+// sees the full ranked list, just with less metadata per entry. This is the
+// second rung of the progressive-shortening ladder (#685 part 2).
+//
+// NOTE: semantic_search has never returned snippets/context lines (unlike
+// code_search which has <ctx> per match). The "full" rung IS the current
+// formatSemanticResults output (rank/distance/source/pagerank/file/symbol/
+// line/language). "no-snippet" here means "drop auxiliary metadata, keep the
+// core locator tuple" — the cheapest per-hit rendering that still lists every
+// hit. See report for the prompt-vs-code discrepancy.
+
+type semanticCompactRespXML struct {
+	XMLName xml.Name               `xml:"response"`
+	Tool    string                 `xml:"tool,attr"`
+	Query   string                 `xml:"query"`
+	Repo    string                 `xml:"repo"`
+	Results semanticCompactResults `xml:"results"`
+}
+
+type semanticCompactResults struct {
+	Count   int                     `xml:"count,attr"`
+	Results []semanticCompactResult `xml:"result"`
+}
+
+type semanticCompactResult struct {
+	Rank     int               `xml:"rank,attr"`
+	Distance string            `xml:"distance,attr"`
+	File     string            `xml:"file"`
+	Symbol   semanticSymbolXML `xml:"symbol"`
+	Line     int               `xml:"line"`
+}
+
+// --- ladder rung 3 (counts) ---
+//
+// Per-file hit counts + total, ordered by descending count. The cheapest
+// rendering: the agent gets "47 hits across 6 files" instead of a
+// hard-truncated fragment when even the compact per-hit rendering overflows
+// the budget.
+
+type semanticCountsRespXML struct {
+	XMLName xml.Name           `xml:"response"`
+	Tool    string             `xml:"tool,attr"`
+	Query   string             `xml:"query"`
+	Repo    string             `xml:"repo"`
+	Results semanticCountsBody `xml:"results"`
+}
+
+type semanticCountsBody struct {
+	Count      int                 `xml:"count,attr"`
+	Files      int                 `xml:"files,attr"`
+	FileCounts []semanticFileCount `xml:"file"`
+}
+
+type semanticFileCount struct {
+	File  string `xml:"file,attr"`
+	Count int    `xml:"count,attr"`
+}
+
 // semanticStatusXML is the disabled/indexing/not-indexed status shape shared by
 // every buildStatusResponse caller.
 type semanticStatusXML struct {

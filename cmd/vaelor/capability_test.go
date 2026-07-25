@@ -221,7 +221,7 @@ func TestCapabilityGauge_SemanticSearchCallTimeHonesty(t *testing.T) {
 	res, err := handleSemanticSearch(context.Background(), SemanticSearchInput{
 		Repo:  "owner/repo",
 		Query: "jwt validation",
-	}, deps)
+	}, deps, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

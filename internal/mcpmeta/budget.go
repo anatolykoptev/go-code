@@ -126,6 +126,16 @@ func StripBudgetMarker(text string) string {
 	return strings.ReplaceAll(text, budgetAppliedMarker, "")
 }
 
+// MarkBudgetApplied appends the budget-applied sentinel so the addTool wrapper
+// detects already-shaped output (IsShaped=true) and skips re-shaping with the
+// default budget. Use after a ladder (or other custom budget mechanism) has
+// fit text to a per-call budget that may exceed DefaultBudget — without this,
+// the wrapper would re-shape at DefaultBudget and truncate the tail (#582).
+// The wrapper strips the marker (StripBudgetMarker) before the agent sees it.
+func MarkBudgetApplied(text string) string {
+	return text + budgetAppliedMarker
+}
+
 // TookFooter returns a compact one-line observability footer:
 //
 //	took_ms=N

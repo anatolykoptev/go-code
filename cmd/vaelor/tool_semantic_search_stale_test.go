@@ -132,7 +132,7 @@ func TestHandleSemanticSearch_StaleSpaceHit_TriggersReindex(t *testing.T) {
 	res, err := handleSemanticSearch(context.Background(), SemanticSearchInput{
 		Repo:  repoDir,
 		Query: "function that validates JWT tokens",
-	}, deps)
+	}, deps, "")
 	if err != nil {
 		t.Fatalf("handleSemanticSearch returned error: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestHandleSemanticSearch_StaleSpaceHit_AlreadyIndexing(t *testing.T) {
 	res, err := handleSemanticSearch(context.Background(), SemanticSearchInput{
 		Repo:  repoDir,
 		Query: "function that validates JWT tokens",
-	}, deps)
+	}, deps, "")
 	if err != nil {
 		t.Fatalf("handleSemanticSearch returned error: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestHandleSemanticSearch_ModelMatch_DoesNotDiscard(t *testing.T) {
 	res, err := handleSemanticSearch(context.Background(), SemanticSearchInput{
 		Repo:  repoDir,
 		Query: "function that validates JWT tokens",
-	}, deps)
+	}, deps, "")
 	if err != nil {
 		t.Fatalf("handleSemanticSearch returned error: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestHandleSemanticSearch_NoStoredModel_PassesThrough(t *testing.T) {
 	res, err := handleSemanticSearch(context.Background(), SemanticSearchInput{
 		Repo:  repoDir,
 		Query: "function that validates JWT tokens",
-	}, deps)
+	}, deps, "")
 	if err != nil {
 		t.Fatalf("handleSemanticSearch returned error: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestHandleSemanticSearch_OrphanPerRowFallback_TriggersReindex(t *testing.T)
 	res, err := handleSemanticSearch(context.Background(), SemanticSearchInput{
 		Repo:  repoDir,
 		Query: "function that validates JWT tokens",
-	}, deps)
+	}, deps, "")
 	if err != nil {
 		t.Fatalf("handleSemanticSearch returned error: %v", err)
 	}

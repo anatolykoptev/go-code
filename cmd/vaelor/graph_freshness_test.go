@@ -461,7 +461,7 @@ func TestFinalResult_GraphStaleAgeS_MarkerInResponse(t *testing.T) {
 	}
 
 	res, err := finalResult(context.Background(), input, deps, "stale-marker-test", "/tmp/stale-marker-test",
-		results, nil, 10, 65813.0, time.Now())
+		results, nil, 10, 65813.0, "", time.Now())
 	if err != nil {
 		t.Fatalf("finalResult error: %v", err)
 	}
@@ -498,7 +498,7 @@ func TestFinalResult_ZeroGraphStaleAgeS_NoMarker(t *testing.T) {
 	}
 
 	res, err := finalResult(context.Background(), input, deps, "fresh-marker-test", "/tmp/fresh-marker-test",
-		results, nil, 10, 0, time.Now())
+		results, nil, 10, 0, "", time.Now())
 	if err != nil {
 		t.Fatalf("finalResult error: %v", err)
 	}
