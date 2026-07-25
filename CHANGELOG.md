@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.59.7](https://github.com/anatolykoptev/vaelor/compare/v1.59.6...v1.59.7) (2026-07-25)
+
+
+### Fixed
+
+* **mcp:** revive remaining dead param descriptions + guard the tag name (Closes [#684](https://github.com/anatolykoptev/vaelor/issues/684)) ([#697](https://github.com/anatolykoptev/vaelor/issues/697)) ([06d07e6](https://github.com/anatolykoptev/vaelor/commit/06d07e63b8d7c50faee7e175d863509dc97214b4))
+
 ## [1.59.6](https://github.com/anatolykoptev/vaelor/compare/v1.59.5...v1.59.6) (2026-07-25)
 
 
