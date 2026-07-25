@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/anatolykoptev/vaelor/internal/analyze"
@@ -25,13 +26,15 @@ type UnderstandInput struct {
 	Language       string `json:"language,omitempty" jsonschema:"Limit to files of this language"`
 	IncludeCallers bool   `json:"include_callers,omitempty" jsonschema:"Include who calls this symbol (default: false)"`
 	FieldAccess    bool   `json:"field_access,omitempty" jsonschema:"When true, include heuristic argument-reference call sites (struct field accesses, identifier args) as callees even when they don't resolve to a known function — legacy permissive behaviour. Default false: only true call expressions and resolved function references are reported."`
+	MaxBytes       int    `json:"max_bytes,omitempty" jsonschema:"Response budget in bytes (default 8192). When the response exceeds this, a progressively condensed rendering is returned with a note saying how it was shortened."`
 }
 
 // understandBuildFromRepo is the production seam for callgraph.BuildFromRepo;
 // handler-level tests can override it to avoid heavy parsing.
 var understandBuildFromRepo = callgraph.BuildFromRepo
 
-func registerUnderstand(server *mcp.Server, _ Config, deps analyze.Deps, sem *SemanticDeps, graphStore *codegraph.Store) {
+func registerUnderstand(server *mcp.Server, cfg Config, deps analyze.Deps, sem *SemanticDeps, graphStore *codegraph.Store) {
+	outputDir := cfg.OutputDir
 	addTool(server, &mcp.Tool{
 		Name: "understand",
 		Description: "Deep-dive into a single symbol. Aggregates: symbol info + callees + callers + complexity. " +
@@ -41,11 +44,11 @@ func registerUnderstand(server *mcp.Server, _ Config, deps analyze.Deps, sem *Se
 			"When a code_graph snapshot exists: shows tested_by (test functions covering this symbol) " +
 			"and dead_code_score (CE reranker confidence that this function is unused, if applicable).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input UnderstandInput) (*mcp.CallToolResult, error) {
-		return handleUnderstand(ctx, input, deps, sem, graphStore)
+		return handleUnderstand(ctx, input, deps, sem, graphStore, outputDir)
 	})
 }
 
-func handleUnderstand(ctx context.Context, input UnderstandInput, deps analyze.Deps, sem *SemanticDeps, graphStore *codegraph.Store) (*mcp.CallToolResult, error) {
+func handleUnderstand(ctx context.Context, input UnderstandInput, deps analyze.Deps, sem *SemanticDeps, graphStore *codegraph.Store, outputDir string) (*mcp.CallToolResult, error) {
 	if input.Repo == "" {
 		return errResult("repo is required"), nil
 	}
@@ -132,16 +135,44 @@ func handleUnderstand(ctx context.Context, input UnderstandInput, deps analyze.D
 		}
 	}
 
-	data, err := json.Marshal(result)
-	if err != nil {
-		return errResult(fmt.Sprintf("marshal: %s", err)), nil
-	}
 	// understand is a terminal call — no chaining hint.
 	env := mcpmeta.Wrap(time.Since(t0), "")
 	if sha := deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)); sha != "" {
 		env = mcpmeta.WithFreshness(env, root, sha)
 	}
-	return metaResult(string(data), env), nil
+	// Progressive result-shortening ladder (#685 part 3): full →
+	// no-learnings (drop prior_learnings/graph_signals/tested_by — the
+	// enrichment from external stores, the "surrounding context" around the
+	// core call topology) → counts (drop per-ref callee/caller lists, keep
+	// counts + symbol identity + tier + dead_code_score + structural_rank).
+	// renderLadder owns the five invariants so this tool cannot forget one.
+	//
+	// Rung choice reasoning: understand's primary value is the call topology
+	// (callees/callers). The enrichment (prior_learnings, graph_signals,
+	// tested_by) is auxiliary context — dropped first. The per-ref lists are
+	// the core payload — dropped last, leaving counts so the agent still
+	// knows "this symbol has N callees, M callers, dead_code_score X".
+	//
+	// Laziness: each rung's rendering work (struct construction +
+	// json.Marshal + appendMetaFooter) is INSIDE the closure, so an
+	// unreached rung is never rendered. The common case (full result fits
+	// rung 1) does exactly one render, not three.
+	//
+	// Budget ownership: the LADDER owns the budget, not the addTool wrapper.
+	// When max_bytes > 0, MarkBudgetApplied appends the budget-applied
+	// sentinel so the wrapper skips re-shaping at DefaultBudget (matches
+	// semantic_search's behaviour).
+	ladder := mcpmeta.Ladder{
+		{Name: "full", Render: func() string { return formatUnderstandFull(result, env) }},
+		{Name: "no-learnings", Render: func() string { return formatUnderstandNoLearnings(result, env) }},
+		{Name: "counts", Render: func() string { return formatUnderstandCounts(result, env) }},
+	}
+	budget := mcpmeta.ResolveBudget(input.MaxBytes, mcpmeta.DefaultBudget)
+	body := renderLadder(ladder, "understand", outputDir, budget)
+	if input.MaxBytes > 0 {
+		body = mcpmeta.MarkBudgetApplied(body)
+	}
+	return textResult(body), nil
 }
 
 // filterByFocus narrows a symbol list to those whose file path matches focus.
@@ -225,4 +256,92 @@ func understandAmbiguousResult(name string, symbols []*parser.Symbol, mappings [
 		Matches: refs,
 	}
 	return jsonMarshalResult(resp), nil
+}
+
+// understandFormatCount is a test-only seam for the render-count laziness
+// assertion. Nil in production (zero overhead); tests set it to an int64
+// counter that the three formatUnderstand* functions increment via
+// atomic.AddInt64. The test then asserts EXACTLY ONE increment when rung 1
+// fits — proving the unreached rungs were never rendered. The spy is on the
+// RENDERING FUNCTION, not on the closure: PickFitting invokes only the
+// closure it reaches, so a closure-level spy cannot distinguish lazy from
+// eager and will pass either way.
+var understandFormatCount *int64
+
+// formatUnderstandFull is ladder rung 1: the complete UnderstandResult JSON
+// with the meta envelope footer. This is the fullest rendering — every
+// callee, caller, body analysis, prior learning, graph signal, etc.
+func formatUnderstandFull(result *compound.UnderstandResult, env mcpmeta.Envelope) string {
+	if understandFormatCount != nil {
+		atomic.AddInt64(understandFormatCount, 1)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"marshal: %s"}`, err.Error())
+	}
+	return appendMetaFooter(string(data), env)
+}
+
+// formatUnderstandNoLearnings is ladder rung 2: the UnderstandResult JSON
+// with the enrichment fields dropped (prior_learnings, graph_signals,
+// tested_by) — the "surrounding context" around the core call topology.
+// The callees/callers lists (the primary payload) are preserved.
+func formatUnderstandNoLearnings(result *compound.UnderstandResult, env mcpmeta.Envelope) string {
+	if understandFormatCount != nil {
+		atomic.AddInt64(understandFormatCount, 1)
+	}
+	// Shallow-copy the result and nil out the enrichment fields. The slices
+	// share backing arrays with the original, but we only read them for
+	// JSON marshaling — no mutation.
+	condensed := *result
+	condensed.PriorLearnings = nil
+	condensed.GraphSignals = nil
+	condensed.TestedBy = nil
+	data, err := json.Marshal(&condensed)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"marshal: %s"}`, err.Error())
+	}
+	return appendMetaFooter(string(data), env)
+}
+
+// understandCountsResult is ladder rung 3 for understand: the symbol
+// identity + per-symbol counts + tier + dead_code_score + structural_rank,
+// with the per-ref callee/caller lists dropped. The cheapest rendering —
+// the agent gets "this symbol has N callees, M callers, dead_code_score X"
+// instead of a hard-truncated JSON fragment when even the no-learnings
+// rendering overflows the budget.
+type understandCountsResult struct {
+	Symbol                compound.SymbolInfo `json:"symbol"`
+	Tier                  string              `json:"tier"`
+	CalleesCount          int                 `json:"callees_count"`
+	CallersCount          int                 `json:"callers_count"`
+	ProductionCallerCount int                 `json:"production_caller_count,omitempty"`
+	DeadCodeScore         *float32            `json:"dead_code_score,omitempty"`
+	DeadCodeNote          string              `json:"dead_code_note,omitempty"`
+	StructuralRank        string              `json:"structural_rank,omitempty"`
+	Warnings              []string            `json:"warnings,omitempty"`
+}
+
+// formatUnderstandCounts is ladder rung 3: per-symbol counts with the
+// per-ref lists dropped.
+func formatUnderstandCounts(result *compound.UnderstandResult, env mcpmeta.Envelope) string {
+	if understandFormatCount != nil {
+		atomic.AddInt64(understandFormatCount, 1)
+	}
+	counts := understandCountsResult{
+		Symbol:                result.Symbol,
+		Tier:                  result.Tier,
+		CalleesCount:          len(result.Callees),
+		CallersCount:          len(result.Callers),
+		ProductionCallerCount: result.ProductionCallerCount,
+		DeadCodeScore:         result.DeadCodeScore,
+		DeadCodeNote:          result.DeadCodeNote,
+		StructuralRank:        result.StructuralRank,
+		Warnings:              result.Warnings,
+	}
+	data, err := json.Marshal(&counts)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"marshal: %s"}`, err.Error())
+	}
+	return appendMetaFooter(string(data), env)
 }

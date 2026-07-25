@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/anatolykoptev/vaelor/internal/analyze"
@@ -12,6 +14,7 @@ import (
 	"github.com/anatolykoptev/vaelor/internal/compare"
 	"github.com/anatolykoptev/vaelor/internal/graphx"
 	"github.com/anatolykoptev/vaelor/internal/impact"
+	"github.com/anatolykoptev/vaelor/internal/mcpmeta"
 	"github.com/anatolykoptev/vaelor/internal/prompts"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -23,6 +26,7 @@ type ImpactInput struct {
 	Depth    int    `json:"depth,omitempty" jsonschema:"Max traversal depth for transitive callers (default 5, max 10)"`
 	Focus    string `json:"focus,omitempty" jsonschema:"Subdirectory path to limit scope (e.g. internal/auth), or space-separated keywords (e.g. 'auth handler')"`
 	Language string `json:"language,omitempty" jsonschema:"Limit to files of this language (e.g. go, python)"`
+	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"Response budget in bytes (default 8192). When the response exceeds this, a progressively condensed rendering is returned with a note saying how it was shortened."`
 }
 
 const (
@@ -33,7 +37,12 @@ const (
 	maxHotspotFiles = 10
 )
 
-func registerImpact(server *mcp.Server, _ Config, deps analyze.Deps, sem *SemanticDeps) {
+// impactBuildFromRepo is the production seam for callgraph.BuildFromRepo;
+// handler-level tests can override it to avoid heavy parsing.
+var impactBuildFromRepo = callgraph.BuildFromRepo
+
+func registerImpact(server *mcp.Server, cfg Config, deps analyze.Deps, sem *SemanticDeps) {
+	outputDir := cfg.OutputDir
 	addTool(server, &mcp.Tool{
 		Name: "impact_analysis",
 		Description: "Analyze the blast radius of changing a function or method. " +
@@ -42,11 +51,11 @@ func registerImpact(server *mcp.Server, _ Config, deps analyze.Deps, sem *Semant
 			"Useful before refactoring to understand what might break. " +
 			"Suggests semantically similar symbols when the target is not found.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input ImpactInput) (*mcp.CallToolResult, error) {
-		return handleImpact(ctx, input, deps, sem)
+		return handleImpact(ctx, input, deps, sem, outputDir)
 	})
 }
 
-func handleImpact(ctx context.Context, input ImpactInput, deps analyze.Deps, sem *SemanticDeps) (*mcp.CallToolResult, error) {
+func handleImpact(ctx context.Context, input ImpactInput, deps analyze.Deps, sem *SemanticDeps, outputDir string) (*mcp.CallToolResult, error) {
 	if input.Repo == "" {
 		return errResult("repo is required"), nil
 	}
@@ -68,7 +77,7 @@ func handleImpact(ctx context.Context, input ImpactInput, deps analyze.Deps, sem
 		depth = maxImpactDepth
 	}
 
-	cg, err := callgraph.BuildFromRepo(ctx, callgraph.TraceRepoInput{
+	cg, err := impactBuildFromRepo(ctx, callgraph.TraceRepoInput{
 		Root:     root,
 		Focus:    input.Focus,
 		Language: input.Language,
@@ -150,13 +159,6 @@ func handleImpact(ctx context.Context, input ImpactInput, deps analyze.Deps, sem
 	}
 
 	// Build output with optional narrative.
-	type impactOutput struct {
-		*impact.Result
-		Tier           string   `json:"tier,omitempty"`
-		Narrative      string   `json:"narrative,omitempty"`
-		HotspotCallers []string `json:"hotspot_callers,omitempty"` // caller symbol names whose file is a top hotspot
-		Notes          []string `json:"notes,omitempty"`           // informational messages about truncation etc.
-	}
 	var notes []string
 	if directCallersTruncNote != "" {
 		notes = append(notes, directCallersTruncNote)
@@ -168,7 +170,38 @@ func handleImpact(ctx context.Context, input ImpactInput, deps analyze.Deps, sem
 		output.Narrative = generateNarrative(ctx, deps.LLM, prompts.SystemPromptImpact, result, prefix)
 	}
 
-	return jsonMarshalResult(output), nil
+	// Progressive result-shortening ladder (#685 part 3): full →
+	// no-narrative (drop the LLM prose — the "surrounding context" around
+	// the structured caller data) → counts (drop per-caller lists + hotspot
+	// callers, keep counts + blast_radius + risk_score + affected_packages).
+	// renderLadder owns the five invariants so this tool cannot forget one.
+	//
+	// Rung choice reasoning: impact's primary value is the caller lists
+	// (the actionable blast-radius data). The narrative is LLM prose
+	// "surrounding context" — dropped first. The per-caller lists are the
+	// core payload — dropped last, leaving counts so the agent still knows
+	// "changing X affects N callers across M packages, blast_radius=high".
+	//
+	// Laziness: each rung's rendering work (json.Marshal + appendMetaFooter)
+	// is INSIDE the closure, so an unreached rung is never rendered. The
+	// common case (full result fits rung 1) does exactly one render, not
+	// three. The narrative generation happens before the ladder (data
+	// assembly, not rendering) — matching call_trace's precedent.
+	//
+	// Budget ownership: the LADDER owns the budget. When max_bytes > 0,
+	// MarkBudgetApplied appends the sentinel so the wrapper skips
+	// re-shaping at DefaultBudget (matches semantic_search's behaviour).
+	ladder := mcpmeta.Ladder{
+		{Name: "full", Render: func() string { return formatImpactFull(output) }},
+		{Name: "no-narrative", Render: func() string { return formatImpactNoNarrative(output) }},
+		{Name: "counts", Render: func() string { return formatImpactCounts(output) }},
+	}
+	budget := mcpmeta.ResolveBudget(input.MaxBytes, mcpmeta.DefaultBudget)
+	body := renderLadder(ladder, "impact_analysis", outputDir, budget)
+	if input.MaxBytes > 0 {
+		body = mcpmeta.MarkBudgetApplied(body)
+	}
+	return textResult(body), nil
 }
 
 // topHotspotSet returns a set of the top-N hotspot file paths.
@@ -266,4 +299,107 @@ func sortCallersByPageRank(ctx context.Context, callers []impact.AffectedSymbol,
 		sorted[i] = callers[orig]
 	}
 	return sorted
+}
+
+// impactOutput is the JSON response struct for impact_analysis. It embeds
+// impact.Result and adds the tier, LLM narrative, hotspot caller names, and
+// informational notes. It is package-level so the ladder rendering functions
+// can accept it.
+type impactOutput struct {
+	*impact.Result
+	Tier           string   `json:"tier,omitempty"`
+	Narrative      string   `json:"narrative,omitempty"`
+	HotspotCallers []string `json:"hotspot_callers,omitempty"` // caller symbol names whose file is a top hotspot
+	Notes          []string `json:"notes,omitempty"`           // informational messages about truncation etc.
+}
+
+// impactFormatCount is a test-only seam for the render-count laziness
+// assertion. Nil in production (zero overhead); tests set it to an int64
+// counter that the three formatImpact* functions increment via
+// atomic.AddInt64. The test then asserts EXACTLY ONE increment when rung 1
+// fits — proving the unreached rungs were never rendered. The spy is on the
+// RENDERING FUNCTION, not on the closure: PickFitting invokes only the
+// closure it reaches, so a closure-level spy cannot distinguish lazy from
+// eager and will pass either way.
+var impactFormatCount *int64
+
+// formatImpactFull is ladder rung 1: the complete impactOutput JSON. This
+// is the fullest rendering — every caller, the LLM narrative, hotspot
+// callers, notes, etc.
+func formatImpactFull(output impactOutput) string {
+	if impactFormatCount != nil {
+		atomic.AddInt64(impactFormatCount, 1)
+	}
+	data, err := json.Marshal(&output)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"marshal: %s"}`, err.Error())
+	}
+	return string(data)
+}
+
+// formatImpactNoNarrative is ladder rung 2: the impactOutput JSON with the
+// LLM narrative dropped — the "surrounding context" around the structured
+// caller data. The caller lists (the primary payload) are preserved.
+func formatImpactNoNarrative(output impactOutput) string {
+	if impactFormatCount != nil {
+		atomic.AddInt64(impactFormatCount, 1)
+	}
+	condensed := output
+	condensed.Narrative = ""
+	data, err := json.Marshal(&condensed)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"marshal: %s"}`, err.Error())
+	}
+	return string(data)
+}
+
+// impactCountsOutput is ladder rung 3 for impact_analysis: the blast-radius
+// verdict + per-tier counts with the per-caller lists and narrative dropped.
+// The cheapest rendering — the agent gets "changing X affects N callers
+// across M packages, blast_radius=high" instead of a hard-truncated JSON
+// fragment when even the no-narrative rendering overflows the budget.
+type impactCountsOutput struct {
+	Symbol                 string   `json:"symbol"`
+	Found                  bool     `json:"found"`
+	TotalAffected          int      `json:"total_affected"`
+	DirectCallersCount     int      `json:"direct_callers_count"`
+	TransitiveCallersCount int      `json:"transitive_callers_count"`
+	HiddenCallersCount     int      `json:"hidden_callers_count,omitempty"`
+	AffectedPackages       []string `json:"affected_packages"`
+	CommunitiesCrossed     int      `json:"communities_crossed"`
+	BlastRadius            string   `json:"blast_radius"`
+	RiskScore              float64  `json:"risk_score"`
+	Tier                   string   `json:"tier,omitempty"`
+	HotspotCallersCount    int      `json:"hotspot_callers_count,omitempty"`
+	TestsCoveringCount     int      `json:"tests_covering_count,omitempty"`
+	Notes                  []string `json:"notes,omitempty"`
+}
+
+// formatImpactCounts is ladder rung 3: per-tier counts with the per-caller
+// lists and narrative dropped.
+func formatImpactCounts(output impactOutput) string {
+	if impactFormatCount != nil {
+		atomic.AddInt64(impactFormatCount, 1)
+	}
+	counts := impactCountsOutput{
+		Symbol:                 output.Symbol,
+		Found:                  output.Found,
+		TotalAffected:          output.TotalAffected,
+		DirectCallersCount:     len(output.DirectCallers),
+		TransitiveCallersCount: len(output.TransitiveCallers),
+		HiddenCallersCount:     len(output.HiddenCallers),
+		AffectedPackages:       output.AffectedPackages,
+		CommunitiesCrossed:     output.CommunitiesCrossed,
+		BlastRadius:            output.BlastRadius,
+		RiskScore:              output.RiskScore,
+		Tier:                   output.Tier,
+		HotspotCallersCount:    len(output.HotspotCallers),
+		TestsCoveringCount:     len(output.TestsCovering),
+		Notes:                  output.Notes,
+	}
+	data, err := json.Marshal(&counts)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"marshal: %s"}`, err.Error())
+	}
+	return string(data)
 }
