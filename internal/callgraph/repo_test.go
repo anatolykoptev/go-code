@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/anatolykoptev/vaelor/internal/goanalysis"
 	"github.com/anatolykoptev/vaelor/internal/ingest"
 	"github.com/anatolykoptev/vaelor/internal/parser"
@@ -657,5 +659,171 @@ func TestWarmGoTypesCache_NoPrewarmBuild(t *testing.T) {
 	}
 	if strings.Contains(logOutput, "go build pre-warm") {
 		t.Errorf("expected NO go build pre-warm log, but found it in output: %s", logOutput)
+	}
+}
+
+// TestWarmGoTypesCache_ColdFailThenSuccessfulZeroEdgeWarm_ClearsWarmingAndRestoresImplements
+// is the RED test for the round-4 defect on issue #735: warmGoTypesCache is
+// started only when the synchronous path did NOT reach BackendGoTypes
+// (repo.go:108). Two states reach it:
+//
+//   - state 1: cold sync load FAILED (tryGoTypesResolution returned (nil, err))
+//     → cached entry has Warming=true, NO IMPLEMENTS (ExtractGoImplements was
+//     skipped on the cold path).
+//   - state 2: sync load SUCCEEDED with zero typed call edges (nil, nil) →
+//     cached entry has Warming=false, IMPLEMENTS present.
+//
+// When the patient background retry SUCCEEDS but yields zero typed edges
+// (typedCG == nil, err == nil), the pre-fix code at repo.go:320 guarded the
+// cache update behind `if typedCG != nil` and never touched the entry. For
+// state 1 that means Warming stays true and IMPLEMENTS stays absent for the
+// full 5-minute cgCacheTTL — even though recordBackgroundWarm("completed")
+// fired and the warm was done. The round-3 comment justifying the skip
+// ("IMPLEMENTS edges were already added on the synchronous request path")
+// was true for state 2 only — inverted for the case the background warm was
+// written for.
+//
+// This test seeds state 1 manually (Warming=true, no IMPLEMENTS), runs a real
+// background warm against a tiny Go module with an interface + satisfying
+// type and NO function calls (so goanalysis.Resolve yields zero typed call
+// edges → typedCG == nil, err == nil), and asserts the cached entry ends
+// with Warming == false AND at least one IMPLEMENTS edge. The two assertions
+// are independent so each can redden on its own when its branch is reverted.
+func TestWarmGoTypesCache_ColdFailThenSuccessfulZeroEdgeWarm_ClearsWarmingAndRestoresImplements(t *testing.T) {
+	dir := t.TempDir()
+
+	gomod := "module example.com/round4warmsuccess\n\ngo 1.22\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// No function calls — goanalysis.Resolve returns zero typed call edges
+	// (typedCG == nil, err == nil on the background retry). Hello satisfies
+	// Greeter structurally — ComputeSatisfactions produces a Hello→Greeter
+	// IMPLEMENTS relationship, which ExtractGoImplements must restore.
+	src := `package main
+
+type Greeter interface {
+	Greet() string
+}
+
+type Hello struct{}
+
+func (h Hello) Greet() string { return "hello" }
+
+func main() {}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+	InvalidateBuildCache()
+
+	key := cgCacheKey(TraceRepoInput{Root: dir})
+
+	// Seed state 1: the synchronous path failed (cold load), so the cached
+	// entry has Warming=true and NO IMPLEMENTS edges. This is exactly what
+	// BuildFromRepo would have cached before kicking off the background warm.
+	seeded := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic",
+		Backend: BackendTreeSitter,
+		Warming: true,
+	}
+	cgCache.set(key, seeded, dir)
+
+	// Run the background warm synchronously. The retry invalidates the
+	// negative-cached cold failure, re-runs packages.Load (now succeeds on
+	// the tiny module), gets zero typed call edges, and must refresh the
+	// cached entry: clear Warming and restore IMPLEMENTS.
+	warmGoTypesCache(dir, seeded.Symbols, key)
+
+	got, ok := cgCache.get(key, dir)
+	if !ok {
+		t.Fatal("expected cached entry to still be present after warm")
+	}
+
+	// Assertion A (independent): Warming must be cleared — the warm is done.
+	if got.Warming {
+		t.Error("expected Warming=false after successful zero-edge background warm; the warm completed and recordBackgroundWarm(\"completed\") fired, but the cached entry was never refreshed (round-4 defect)")
+	}
+
+	// Assertion B (independent): at least one IMPLEMENTS edge must be present
+	// — state 1 had none (ExtractGoImplements was skipped on the cold sync
+	// path), and the successful warm must restore them.
+	var hasImplements bool
+	for _, rel := range got.TypeRels {
+		if rel.Kind == parser.RelImplements {
+			hasImplements = true
+			break
+		}
+	}
+	if !hasImplements {
+		t.Error("expected at least one IMPLEMENTS edge after successful zero-edge warm (state 1 had none; ExtractGoImplements must run on the warm path); TypeRels is empty")
+	}
+}
+
+// TestWarmGoTypesCache_ColdFailThenFailedWarm_PreservesCacheAndRecordsFailed
+// pins today's failure-path behaviour so a future change cannot silently alter
+// it. When the patient background retry FAILS (err != nil), warmGoTypesCache
+// must log, record outcome="failed", and return WITHOUT touching the cached
+// entry — the cache stays at whatever the synchronous path left (state 1:
+// Warming=true, no IMPLEMENTS). This is correct: nothing was warmed, so the
+// warming note stays honest and a later retry can still upgrade the entry.
+func TestWarmGoTypesCache_ColdFailThenFailedWarm_PreservesCacheAndRecordsFailed(t *testing.T) {
+	dir := t.TempDir()
+
+	// go.mod with a syntax error — packages.Load fails at go.mod parse time
+	// (no network, no GOCACHE warm-up), so tryGoTypesResolution returns
+	// (nil, err) on the background retry too.
+	gomod := "module example.com/round4warmfail\n\ngo 1.21\n\nthis is not valid go.mod syntax\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+	InvalidateBuildCache()
+
+	key := cgCacheKey(TraceRepoInput{Root: dir})
+
+	// Seed state 1: Warming=true, no IMPLEMENTS — what the cold sync path
+	// cached before kicking off the background warm.
+	seeded := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic",
+		Backend: BackendTreeSitter,
+		Warming: true,
+	}
+	cgCache.set(key, seeded, dir)
+
+	failedBefore := testutil.ToFloat64(backgroundWarmTotal.WithLabelValues("failed"))
+
+	// Run the background warm synchronously. It must fail (broken go.mod),
+	// record "failed", and leave the cache untouched.
+	warmGoTypesCache(dir, seeded.Symbols, key)
+
+	failedAfter := testutil.ToFloat64(backgroundWarmTotal.WithLabelValues("failed"))
+	if failedAfter != failedBefore+1 {
+		t.Errorf("expected backgroundWarmTotal{failed} to increment by 1 (%v → %v); the failure path must still record outcome=failed", failedBefore, failedAfter)
+	}
+
+	got, ok := cgCache.get(key, dir)
+	if !ok {
+		t.Fatal("expected cached entry to still be present after a FAILED warm (cache must not be evicted on failure)")
+	}
+
+	// Cache must be unchanged: Warming still true (nothing was warmed), no
+	// IMPLEMENTS (ExtractGoImplements must not run on the failure path).
+	if !got.Warming {
+		t.Error("expected Warming=true to be PRESERVED after a failed background warm (nothing was warmed; the warming note must stay honest for a later retry)")
+	}
+	for _, rel := range got.TypeRels {
+		if rel.Kind == parser.RelImplements {
+			t.Errorf("expected NO IMPLEMENTS edges after a failed warm (ExtractGoImplements must not run on the failure path); found %+v", rel)
+		}
 	}
 }

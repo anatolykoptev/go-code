@@ -311,21 +311,63 @@ func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 		return
 	}
 
-	// typedCG may be nil with err == nil: the load succeeded but produced
-	// zero typed call edges. That is a successful warm, not a failure — there
-	// is simply nothing to merge. IMPLEMENTS edges were already added on the
-	// synchronous request path (EnrichWithTypedResolution runs
-	// ExtractGoImplements on the load-succeeded branch), so the cached entry
-	// already carries them and needs no upgrade here.
-	if typedCG != nil {
-		// Upgrade existing cache entry to enhanced tier.
-		if cached, ok := cgCache.get(cacheKey, root); ok {
-			enhanced := MergeCallGraphs(cached, typedCG)
-			enhanced.Tier = "enhanced"
-			enhanced.Backend = BackendGoTypes
-			cgCache.set(cacheKey, enhanced, root)
+	// A successful warm (err == nil) must always refresh the cached entry,
+	// not only when typedCG != nil. Two states reach this goroutine (gated
+	// on cg.Backend != BackendGoTypes in BuildFromRepo, repo.go:108):
+	//
+	//   1. Cold sync load FAILED (tryGoTypesResolution returned (nil, err)):
+	//      the cached entry has Warming=true and NO IMPLEMENTS edges
+	//      (ExtractGoImplements was skipped on the cold path, issue #735).
+	//      The background warm exists precisely for this case.
+	//   2. Sync load SUCCEEDED with zero typed call edges (tryGoTypesResolution
+	//      returned (nil, nil)): the cached entry already has Warming=false
+	//      and IMPLEMENTS present (EnrichWithTypedResolution ran
+	//      ExtractGoImplements on the load-succeeded branch).
+	//
+	// When the patient retry SUCCEEDS but yields zero typed edges (typedCG ==
+	// nil, err == nil), the pre-fix code guarded the cache update behind
+	// `if typedCG != nil` and never touched the entry. For state 1 that left
+	// Warming=true and IMPLEMENTS absent for the full 5-minute cgCacheTTL —
+	// even though recordBackgroundWarm("completed") fired and the warm was
+	// done. The round-3 comment "IMPLEMENTS edges were already added on the
+	// synchronous request path" was true for state 2 only — inverted for the
+	// case the background warm was written for. Every consumer serving from
+	// that stale entry kept emitting "type-aware enrichment is warming, retry
+	// for the enhanced tier", and the retry hit the same stale cache — the
+	// note became a lie for five minutes, defeating its purpose.
+	//
+	// On a successful warm we now always: clear Warming (the warm is done),
+	// and ensure IMPLEMENTS edges are present. IMPLEMENTS extraction is cheap
+	// on a warm load (shares the CachedLoadPackages the retry just populated),
+	// but state 2 already carries them — check first (hasImplementsEdge) to
+	// avoid duplicates rather than dedupe after the fact.
+	if cached, ok := cgCache.get(cacheKey, root); ok {
+		if typedCG != nil {
+			cached = MergeCallGraphs(cached, typedCG)
+			cached.Tier = "enhanced"
+			cached.Backend = BackendGoTypes
 		}
+		cached.Warming = false
+		if !hasImplementsEdge(cached) {
+			cached.TypeRels = append(cached.TypeRels, ExtractGoImplements(ctx, root)...)
+		}
+		cgCache.set(cacheKey, cached, root)
 	}
 	slog.Info("go/types: GOCACHE warmed", "root", root)
 	recordBackgroundWarm("completed")
+}
+
+// hasImplementsEdge reports whether cg already carries at least one
+// IMPLEMENTS TypeRelationship. Used by warmGoTypesCache to decide whether to
+// call ExtractGoImplements on a successful zero-edge warm: state 2 (sync load
+// succeeded with zero call edges) already appended IMPLEMENTS on the
+// synchronous path, so re-running extraction here would duplicate them; state
+// 1 (sync load failed) has none and needs them restored.
+func hasImplementsEdge(cg *CallGraph) bool {
+	for _, rel := range cg.TypeRels {
+		if rel.Kind == parser.RelImplements {
+			return true
+		}
+	}
+	return false
 }
