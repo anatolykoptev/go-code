@@ -108,6 +108,14 @@ func (p *Pipeline) IncrementalSync(ctx context.Context, repoKey, root string) (*
 			// Fall through to full re-index (safe).
 		} else if embCount > 0 {
 			// Healthy: SHA unchanged AND rows present → safe to skip.
+			// #720: run the dry-run path reconciliation through the SAME shared
+			// seam as checkSameSHAFastPath (IndexRepo). The boot autoindex calls
+			// IncrementalSync, not IndexRepo, so without this call 72/77 repos
+			// skip without ever reconciling or backfilling a pathless source_path
+			// (the v1.59.12 regression). The seam (runFastPathDryRunReconcile)
+			// owns the reconcile + backfill calls so they cannot drift between
+			// the two same-SHA paths. Dry-run deletes nothing.
+			p.runFastPathDryRunReconcile(ctx, repoKey, root)
 			if err := p.writeRepoState(ctx, repoKey, currentSHA, root); err != nil {
 				recordRepoStateWriteFailure(repoKey, "incrementalSync:same-sha", err)
 			}
