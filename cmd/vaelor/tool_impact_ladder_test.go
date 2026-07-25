@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/anatolykoptev/go-kit/llm"
 	"github.com/anatolykoptev/vaelor/internal/analyze"
 	"github.com/anatolykoptev/vaelor/internal/callgraph"
+	"github.com/anatolykoptev/vaelor/internal/impact"
 	"github.com/anatolykoptev/vaelor/internal/mcpmeta"
 	"github.com/anatolykoptev/vaelor/internal/parser"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -437,12 +437,141 @@ func TestImpact_Rung1Fits_RendersExactlyOne(t *testing.T) {
 		t.Fatalf("handleImpact: %v", err)
 	}
 
-	// Ensure the counter was actually wired — a broken spy that never
-	// increments would pass with count==0, proving nothing.
-	if !atomic.CompareAndSwapInt64(&count, 1, 1) && count == 0 {
+	// Spy-wiring check: count == 0 means the spy was never incremented,
+	// proving nothing (a broken spy passes the laziness check vacuously).
+	if count == 0 {
 		t.Fatal("spy never incremented — impactFormatCount not wired to formatImpact* functions")
 	}
+	// Laziness check: exactly one render for a rung-1-fits result.
 	if count != 1 {
 		t.Fatalf("rung-1-fits case must render EXACTLY ONE rung, got %d (eager-render regression)", count)
+	}
+}
+
+// stubNarrativeLLM is a stub llm.Completer that returns a fixed narrative
+// string. It lets the impact rung-2 test populate the Narrative field (which
+// NoOp leaves empty) without a live LLM, driving the real generateNarrative
+// → handleImpact path.
+type stubNarrativeLLM struct{ narrative string }
+
+func (s stubNarrativeLLM) Complete(_ context.Context, _, _ string, _ ...llm.ChatOption) (string, error) {
+	return s.narrative, nil
+}
+
+// buildSmallImpactCallGraph builds a CallGraph with 1 target "Foo" and a FEW
+// direct callers with SHORT paths — small enough that rung 2 (no narrative)
+// fits DefaultBudget. The narrative (injected via the stub LLM) is what
+// overflows rung 1 — so rung 2 is the rung that fits, not rung 3.
+func buildSmallImpactCallGraph(root string) *callgraph.CallGraph {
+	target := &parser.Symbol{
+		Name: "Foo", Kind: parser.KindFunction, File: root + "/src/handler.go",
+		StartLine: 1, EndLine: 40,
+	}
+	symbols := []*parser.Symbol{target}
+	var edges []callgraph.CallEdge
+	for i := 0; i < 3; i++ {
+		caller := &parser.Symbol{
+			Name: fmt.Sprintf("caller_%d", i), Kind: parser.KindFunction,
+			File: fmt.Sprintf("%s/src/caller_%d.go", root, i), StartLine: uint32(i*10 + 1),
+		}
+		symbols = append(symbols, caller)
+		edges = append(edges, callgraph.CallEdge{
+			Caller: caller, Callee: target, CalleeName: target.Name, Line: uint32(i + 5),
+		})
+	}
+	return &callgraph.CallGraph{Edges: edges, Symbols: symbols, Tier: "basic"}
+}
+
+// TestImpact_Rung2DropsNarrative_IsRung2ValidSmaller pins the MIDDLE rung of
+// the impact_analysis ladder (#685 part 3, round 2). The pre-existing
+// fixture (impactLadderDeps) wires a NoOp LLM, so generateNarrative returns
+// "" and rung 2 (no-narrative) renders byte-for-byte identical to rung 1,
+// overflowed again, and the ladder fell through to rung 3 — nothing asserted
+// rung 2 was ever reached, valid in isolation, or saved any bytes.
+//
+// This test wires a stub LLM that returns a ~10K-char narrative, sized so
+// rung 1 (topology + narrative) overflows DefaultBudget (8192) and rung 2
+// (topology only) fits. Then asserts:
+//  1. the rendering is rung 2 (direct_callers present, narrative absent,
+//     direct_callers_count absent) — NOT rung 1 and NOT rung 3;
+//  2. it is valid, parseable JSON on its own;
+//  3. it carries the condensation note and the note names the rung (HOW);
+//  4. it is strictly smaller than rung 1's rendering for the same input.
+//
+// RED-on-revert: make rung 2 stop dropping the narrative (render
+// byte-identical to rung 1) and assertion 4 goes RED — a rung that saves
+// nothing is not a rung. Force the ladder to a different rung and assertion
+// 1 goes RED.
+func TestImpact_Rung2DropsNarrative_IsRung2ValidSmaller(t *testing.T) {
+	root := t.TempDir()
+	cg := buildSmallImpactCallGraph(root)
+	cleanup := setupImpactBuildSeam(t, cg)
+	defer cleanup()
+
+	// ~10K-char narrative: rung 1 (topology ~1K + narrative ~10K) ≈ 11K,
+	// well over DefaultBudget (8192); rung 2 (topology ~1K) fits easily.
+	// The narrative is large (not tuned to fit MaxBudget=9000) because rung 1
+	// is rendered directly via formatImpactFull for the size comparison —
+	// MaxBudget caps the per-call budget above DefaultBudget, so no MaxBytes
+	// override can make the ladder return rung 1 for a result this large.
+	narrative := strings.Repeat("impact-narrative-prose-", 435)
+	stubLLM := stubNarrativeLLM{narrative: narrative}
+	deps := analyze.Deps{LLM: stubLLM, LLMHasKey: true}
+
+	// Rung 2: default budget → rung 1 (with narrative) overflows, rung 2 fits.
+	rung2Res, err := handleImpact(context.Background(),
+		ImpactInput{Repo: root, Symbol: "Foo"}, deps, nil, "")
+	if err != nil {
+		t.Fatalf("handleImpact rung2: %v", err)
+	}
+	rung2Text := impactResultText(t, rung2Res)
+	rung2JSON := strings.TrimSpace(jsonBodyOf(rung2Text))
+
+	// 1. Rung 2 reached: has "direct_callers" (rung 1 or 2), no "narrative"
+	//    (not rung 1), no "direct_callers_count" (not rung 3).
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(rung2JSON), &keys); err != nil {
+		t.Fatalf("rung 2 must be valid JSON: %v\n(first 400):\n%s", err, truncForLog(rung2JSON, 400))
+	}
+	if _, ok := keys["direct_callers"]; !ok {
+		t.Fatalf("rung 2 must carry the direct_callers array (rung 1 or 2 shape), got keys present: %v", mapKeys(keys))
+	}
+	if _, ok := keys["narrative"]; ok {
+		t.Fatal("rung 2 must NOT carry narrative — that is rung 1's LLM prose, dropped at rung 2")
+	}
+	if _, ok := keys["direct_callers_count"]; ok {
+		t.Fatal("rung 2 must NOT carry direct_callers_count — that is the rung 3 shape")
+	}
+
+	// 2. Valid, parseable JSON on its own (ladder-shape agnostic).
+	if err := parseImpactJSON(rung2Text); err != nil {
+		t.Fatalf("rung 2 must be parseable JSON: %v\n(first 400):\n%s", err, truncForLog(rung2Text, 400))
+	}
+
+	// 3. Condensation note present and names the rung (HOW it was shortened).
+	if !strings.Contains(rung2Text, "<!-- condensed:") {
+		t.Fatalf("rung 2 must carry a condensation note, got (first 200):\n%s", truncForLog(rung2Text, 200))
+	}
+	if !strings.Contains(rung2Text, "no-narrative") {
+		t.Fatalf("condensation note must name the rung (no-narrative = HOW), got (first 300):\n%s", truncForLog(rung2Text, 300))
+	}
+
+	// 4. Strictly smaller than rung 1's rendering for the same input. Rung 1
+	//    is the exact function the ladder calls (formatImpactFull); we
+	//    reconstruct the output handleImpact would build (impact.Analyze +
+	//    the stub narrative) and invoke it directly, because MaxBudget (9000)
+	//    caps the per-call budget above DefaultBudget — no MaxBytes override
+	//    can make the ladder return rung 1 for an 11K result. The comparison
+	//    is about the byte savings of rung 2 vs rung 1, a property of the
+	//    rung design.
+	impactResult := impact.Analyze(context.Background(), cg, "Foo", impact.Options{
+		MaxDepth: defaultImpactDepth, Root: root, Repo: root,
+	})
+	rung1Output := impactOutput{Result: impactResult, Tier: cg.Tier, Narrative: narrative}
+	rung1Text := formatImpactFull(rung1Output)
+	rung1JSON := jsonBodyOf(rung1Text)
+	if len(rung2JSON) >= len(rung1JSON) {
+		t.Fatalf("rung 2 must be STRICTLY smaller than rung 1: len(rung2)=%d >= len(rung1)=%d\nrung2 (first 200): %s\nrung1 (first 200): %s",
+			len(rung2JSON), len(rung1JSON), truncForLog(rung2JSON, 200), truncForLog(rung1JSON, 200))
 	}
 }

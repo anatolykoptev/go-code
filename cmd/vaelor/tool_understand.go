@@ -33,6 +33,13 @@ type UnderstandInput struct {
 // handler-level tests can override it to avoid heavy parsing.
 var understandBuildFromRepo = callgraph.BuildFromRepo
 
+// understandCompound is the production seam for compound.Understand; tests
+// can override it to inject a pre-built UnderstandResult (e.g. one with
+// prior_learnings/graph_signals/tested_by populated) without wiring a live
+// learnings store or AGE graph. The seam is on the result-assembly step, not
+// on the ladder — the ladder still runs through renderLadder/formatUnderstand*.
+var understandCompound = compound.Understand
+
 func registerUnderstand(server *mcp.Server, cfg Config, deps analyze.Deps, sem *SemanticDeps, graphStore *codegraph.Store) {
 	outputDir := cfg.OutputDir
 	addTool(server, &mcp.Tool{
@@ -121,7 +128,7 @@ func handleUnderstand(ctx context.Context, input UnderstandInput, deps analyze.D
 		opts.DeadCodeScores = graphStore
 		opts.SymbolRanker = graphStore
 	}
-	result := compound.Understand(ctx, matches[0], cg, opts)
+	result := understandCompound(ctx, matches[0], cg, opts)
 
 	// Reverse-map container-internal paths back to host-side paths so callers
 	// see clickable file locations matching their local checkout.
@@ -306,10 +313,13 @@ func formatUnderstandNoLearnings(result *compound.UnderstandResult, env mcpmeta.
 
 // understandCountsResult is ladder rung 3 for understand: the symbol
 // identity + per-symbol counts + tier + dead_code_score + structural_rank,
-// with the per-ref callee/caller lists dropped. The cheapest rendering —
+// with the per-ref callee/caller lists, body_analysis, prior_learnings,
+// graph_signals, and tested_by all dropped. The cheapest rendering —
 // the agent gets "this symbol has N callees, M callers, dead_code_score X"
 // instead of a hard-truncated JSON fragment when even the no-learnings
-// rendering overflows the budget.
+// rendering overflows the budget. (prior_learnings/graph_signals/tested_by
+// are already absent at rung 2; body_analysis and the per-ref lists are the
+// fields rung 3 drops relative to rung 2.)
 type understandCountsResult struct {
 	Symbol                compound.SymbolInfo `json:"symbol"`
 	Tier                  string              `json:"tier"`
