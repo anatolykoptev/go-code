@@ -83,12 +83,12 @@ func (k HintKind) IsValid() bool {
 
 // DebugInvestigateInput is the user-facing tool input.
 type DebugInvestigateInput struct {
-	Service   string   `json:"service" jsonschema_description:"Service name as known to Jaeger (e.g. 'go-code', 'acme-web')."`
-	StartUnix int64    `json:"start_unix" jsonschema_description:"Investigation window start, unix seconds. If 0, defaults to now-15m."`
-	EndUnix   int64    `json:"end_unix" jsonschema_description:"Investigation window end, unix seconds. If 0, defaults to now."`
-	Hint      string   `json:"hint,omitempty" jsonschema_description:"Optional free-text hint about the suspected behaviour."`
-	HintKind  HintKind `json:"hint_kind,omitempty" jsonschema_description:"Optional structured hint kind: frontend_reactive_cycle | panic_at_handler | metric_spike_unknown_source | latency_spike. Empty = auto-detect (default)."`
-	Repo      string   `json:"repo,omitempty" jsonschema_description:"Repo path for symbol lookup. Defaults to the service's resolved repo when known."`
+	Service   string   `json:"service" jsonschema:"Service name as known to Jaeger (e.g. 'go-code', 'acme-web')."`
+	StartUnix int64    `json:"start_unix" jsonschema:"Investigation window start, unix seconds. If 0, defaults to now-15m."`
+	EndUnix   int64    `json:"end_unix" jsonschema:"Investigation window end, unix seconds. If 0, defaults to now."`
+	Hint      string   `json:"hint,omitempty" jsonschema:"Optional free-text hint about the suspected behaviour."`
+	HintKind  HintKind `json:"hint_kind,omitempty" jsonschema:"Optional structured hint kind: frontend_reactive_cycle | panic_at_handler | metric_spike_unknown_source | latency_spike. Empty = auto-detect (default)."`
+	Repo      string   `json:"repo,omitempty" jsonschema:"Repo path for symbol lookup. Defaults to the service's resolved repo when known."`
 	// Host, when set, enables Phase 7 (fleet_versions). Forms accepted:
 	//   "local://"           - local docker socket (default if Host == "")
 	//   "ssh://user@host[:port]" - via system ssh (requires GOCODE_FLEET_SSH_ENABLE=true)
@@ -97,11 +97,11 @@ type DebugInvestigateInput struct {
 	// is silently skipped. When unset AND a compose/Dockerfile IS detected,
 	// Phase 7 records one Diagnostics.Warning explaining how to enable it,
 	// then skips.
-	Host string `json:"host,omitempty"  jsonschema_description:"Optional probe target for runtime-binary drift analysis (Phase 7). 'local://' for local docker, 'ssh://...' for remote (requires GOCODE_FLEET_SSH_ENABLE=true)."`
+	Host string `json:"host,omitempty"  jsonschema:"Optional probe target for runtime-binary drift analysis (Phase 7). 'local://' for local docker, 'ssh://...' for remote (requires GOCODE_FLEET_SSH_ENABLE=true)."`
 	// Hosts enables multi-host Phase 7. Supersedes Host when both are set.
-	Hosts []string `json:"hosts,omitempty" jsonschema_description:"Multiple probe targets for Phase 7 fleet diff. Supersedes 'host' when set. Each is local://, docker://, or ssh://[user@]host[:port]."`
+	Hosts []string `json:"hosts,omitempty" jsonschema:"Multiple probe targets for Phase 7 fleet diff. Supersedes 'host' when set. Each is local://, docker://, or ssh://[user@]host[:port]."`
 	// MaxBytes is the per-call response budget override (default 8192).
-	MaxBytes int `json:"max_bytes,omitempty" jsonschema_description:"Response budget in bytes (default 8192). When the response exceeds this, the ranked head is returned with a continuation footer."`
+	MaxBytes int `json:"max_bytes,omitempty" jsonschema:"Response budget in bytes (default 8192). When the response exceeds this, the ranked head is returned with a continuation footer."`
 }
 
 // debugInvestigateStore is module-scoped — survives across calls in the same process.

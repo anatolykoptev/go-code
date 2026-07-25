@@ -11,21 +11,21 @@ import (
 
 // GithubCodeSearchInput is the input schema for the github_code_search tool.
 type GithubCodeSearchInput struct {
-	Query          string   `json:"query" jsonschema_description:"Code search query. Supports GitHub syntax: 'func resize language:python', 'className path:src/', 'TODO language:go'. Without repo qualifier searches all public repos."`
-	Repo           string   `json:"repo,omitempty" jsonschema_description:"Repository to search (owner/repo or full GitHub URL). If empty, searches all public GitHub."`
-	ExcludeRepos   []string `json:"exclude_repos,omitempty" jsonschema_description:"Repositories to exclude (owner/repo or full URL). Added as -repo: qualifiers."`
-	Language       string   `json:"language,omitempty" jsonschema_description:"Filter results by language (e.g. go, python). Appended as language: qualifier if not already in query."`
-	FileExtensions []string `json:"file_extensions,omitempty" jsonschema_description:"Filter results by file extension (e.g. go, ts). Added as extension: qualifiers. Leading dots are stripped."`
-	Sort           string   `json:"sort,omitempty" jsonschema_description:"Sort field for code search. Only 'indexed' is supported by the GitHub API (default: best match)."`
-	Order          string   `json:"order,omitempty" jsonschema_description:"Sort order: asc or desc (default: desc)."`
-	MinStars       int      `json:"min_stars,omitempty" jsonschema_description:"Minimum stargazers count for the result's repository. Requires extra repo metadata calls; set per_page to 100 to get enough candidates."`
-	PerPage        int      `json:"per_page,omitempty" jsonschema_description:"Results per page (default: 10, max: 100)"`
-	Page           int      `json:"page,omitempty" jsonschema_description:"Page number for pagination (default: 1)"`
-	MaxResults     int      `json:"max_results,omitempty" jsonschema_description:"Maximum results to return after server-side filtering. Capped at 1000 (100 when min_stars is used). May override per_page for efficiency."`
+	Query          string   `json:"query" jsonschema:"Code search query. Supports GitHub syntax: 'func resize language:python', 'className path:src/', 'TODO language:go'. Without repo qualifier searches all public repos."`
+	Repo           string   `json:"repo,omitempty" jsonschema:"Repository to search (owner/repo or full GitHub URL). If empty, searches all public GitHub."`
+	ExcludeRepos   []string `json:"exclude_repos,omitempty" jsonschema:"Repositories to exclude (owner/repo or full URL). Added as -repo: qualifiers."`
+	Language       string   `json:"language,omitempty" jsonschema:"Filter results by language (e.g. go, python). Appended as language: qualifier if not already in query."`
+	FileExtensions []string `json:"file_extensions,omitempty" jsonschema:"Filter results by file extension (e.g. go, ts). Added as extension: qualifiers. Leading dots are stripped."`
+	Sort           string   `json:"sort,omitempty" jsonschema:"Sort field for code search. Only 'indexed' is supported by the GitHub API (default: best match)."`
+	Order          string   `json:"order,omitempty" jsonschema:"Sort order: asc or desc (default: desc)."`
+	MinStars       int      `json:"min_stars,omitempty" jsonschema:"Minimum stargazers count for the result's repository. Requires extra repo metadata calls; set per_page to 100 to get enough candidates."`
+	PerPage        int      `json:"per_page,omitempty" jsonschema:"Results per page (default: 10, max: 100)"`
+	Page           int      `json:"page,omitempty" jsonschema:"Page number for pagination (default: 1)"`
+	MaxResults     int      `json:"max_results,omitempty" jsonschema:"Maximum results to return after server-side filtering. Capped at 1000 (100 when min_stars is used). May override per_page for efficiency."`
 	// MaxFragmentChars limits each text-match fragment. 0 means no limit.
-	MaxFragmentChars int `json:"max_fragment_chars,omitempty" jsonschema_description:"Max characters per code fragment. 0 or omitted means no limit."`
+	MaxFragmentChars int `json:"max_fragment_chars,omitempty" jsonschema:"Max characters per code fragment. 0 or omitted means no limit."`
 	// MaxTotalChars limits the total joined content per result. 0 means no limit.
-	MaxTotalChars int `json:"max_total_chars,omitempty" jsonschema_description:"Max total characters of joined fragments per result. 0 or omitted means no limit."`
+	MaxTotalChars int `json:"max_total_chars,omitempty" jsonschema:"Max total characters of joined fragments per result. 0 or omitted means no limit."`
 }
 
 // githubCodeSearchResult is a single search result.

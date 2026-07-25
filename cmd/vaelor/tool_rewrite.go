@@ -12,14 +12,14 @@ import (
 
 // RewriteInput is the input schema for the rewrite tool.
 type RewriteInput struct {
-	Repo        string `json:"repo" jsonschema_description:"Repository: GitHub slug, URL, or absolute local path"`
-	Pattern     string `json:"pattern" jsonschema_description:"Structural AST pattern with $WILDCARDS (e.g. 'if $ERR != nil { return $ERR }')"`
-	Rewrite     string `json:"rewrite" jsonschema_description:"Replacement template using same $WILDCARDS (e.g. 'if $ERR != nil { return fmt.Errorf(\"%w\", $ERR) }')"`
-	Language    string `json:"language" jsonschema_description:"Target language (go, rust, python, typescript, java, etc.)"`
-	MaxResults  int    `json:"max_results,omitempty" jsonschema_description:"Max matches (default: 50)"`
-	FileGlob    string `json:"file_glob,omitempty" jsonschema_description:"File glob filter (e.g. '*.go')"`
-	ExcludeGlob string `json:"exclude_glob,omitempty" jsonschema_description:"Exclude glob filter (e.g. 'vendor/*,testdata/*')"`
-	Apply       bool   `json:"apply,omitempty" jsonschema_description:"If true, write changes to disk (default: dry-run diff only)"`
+	Repo        string `json:"repo" jsonschema:"Repository: GitHub slug, URL, or absolute local path"`
+	Pattern     string `json:"pattern" jsonschema:"Structural AST pattern with $WILDCARDS (e.g. 'if $ERR != nil { return $ERR }')"`
+	Rewrite     string `json:"rewrite" jsonschema:"Replacement template using same $WILDCARDS (e.g. 'if $ERR != nil { return fmt.Errorf(\"%w\", $ERR) }')"`
+	Language    string `json:"language" jsonschema:"Target language (go, rust, python, typescript, java, etc.)"`
+	MaxResults  int    `json:"max_results,omitempty" jsonschema:"Max matches (default: 50)"`
+	FileGlob    string `json:"file_glob,omitempty" jsonschema:"File glob filter (e.g. '*.go')"`
+	ExcludeGlob string `json:"exclude_glob,omitempty" jsonschema:"Exclude glob filter (e.g. 'vendor/*,testdata/*')"`
+	Apply       bool   `json:"apply,omitempty" jsonschema:"If true, write changes to disk (default: dry-run diff only)"`
 }
 
 type xmlRewriteResponse struct {

@@ -16,16 +16,16 @@ import (
 
 // CodeResearchInput is the input schema for the code_research tool.
 type CodeResearchInput struct {
-	Repo             string `json:"repo,omitempty" jsonschema_description:"GitHub repo (owner/repo) or local path. Required in practice — omitting it returns a short error naming recently-indexed repos."`
-	Query            string `json:"query" jsonschema_description:"Natural language query describing what you're looking for (e.g. 'DAG parallel executor implementation', 'how retry logic works')"`
-	Language         string `json:"language,omitempty" jsonschema_description:"Filter by language (e.g. go, python, typescript). Optional."`
-	MaxTokens        int    `json:"max_tokens,omitempty" jsonschema_description:"Token budget for the output map (default 8000). Higher = more context, more tokens."`
-	ExpandHops       int    `json:"expand_hops,omitempty" jsonschema_description:"Import-graph expansion hops from seed files (default 2). Higher = wider context."`
-	IncludeBody      bool   `json:"include_body,omitempty" jsonschema_description:"Include full function bodies in the output (default false). Significantly increases token usage."`
-	FileGlob         string `json:"file_glob,omitempty" jsonschema_description:"Restrict analysis to files matching this glob (e.g. 'internal/**', 'pkg/foo/*.go'). Optional."`
-	IncludeTests     bool   `json:"include_tests,omitempty" jsonschema_description:"Include *_test.go / test files in retrieval (default false). Useful for 'how is X tested' queries."`
-	IncludeCallGraph bool   `json:"include_call_graph,omitempty" jsonschema_description:"Expand retrieval via call-graph edges (callers + callees) in addition to imports. Slower but higher precision for 'what calls X' queries."`
-	Compact          bool   `json:"compact,omitempty" jsonschema_description:"If true, return only the stats header and rendered map (skip <seeds>/<graph>). ~20% token savings."`
+	Repo             string `json:"repo,omitempty" jsonschema:"GitHub repo (owner/repo) or local path. Required in practice — omitting it returns a short error naming recently-indexed repos."`
+	Query            string `json:"query" jsonschema:"Natural language query describing what you're looking for (e.g. 'DAG parallel executor implementation', 'how retry logic works')"`
+	Language         string `json:"language,omitempty" jsonschema:"Filter by language (e.g. go, python, typescript). Optional."`
+	MaxTokens        int    `json:"max_tokens,omitempty" jsonschema:"Token budget for the output map (default 8000). Higher = more context, more tokens."`
+	ExpandHops       int    `json:"expand_hops,omitempty" jsonschema:"Import-graph expansion hops from seed files (default 2). Higher = wider context."`
+	IncludeBody      bool   `json:"include_body,omitempty" jsonschema:"Include full function bodies in the output (default false). Significantly increases token usage."`
+	FileGlob         string `json:"file_glob,omitempty" jsonschema:"Restrict analysis to files matching this glob (e.g. 'internal/**', 'pkg/foo/*.go'). Optional."`
+	IncludeTests     bool   `json:"include_tests,omitempty" jsonschema:"Include *_test.go / test files in retrieval (default false). Useful for 'how is X tested' queries."`
+	IncludeCallGraph bool   `json:"include_call_graph,omitempty" jsonschema:"Expand retrieval via call-graph edges (callers + callees) in addition to imports. Slower but higher precision for 'what calls X' queries."`
+	Compact          bool   `json:"compact,omitempty" jsonschema:"If true, return only the stats header and rendered map (skip <seeds>/<graph>). ~20% token savings."`
 }
 
 // registerCodeResearch registers the code_research MCP tool.

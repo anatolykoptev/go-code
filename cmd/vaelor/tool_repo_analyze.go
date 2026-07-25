@@ -24,18 +24,18 @@ const (
 
 // RepoAnalyzeInput is the input schema for the repo_analyze tool.
 type RepoAnalyzeInput struct {
-	Repo      string   `json:"repo" jsonschema_description:"GitHub repo slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
-	Query     string   `json:"query" jsonschema_description:"What to search for / analyze in the repository"`
-	Ref       string   `json:"ref,omitempty" jsonschema_description:"Branch, tag, or commit SHA (default: HEAD)"`
-	Focus     string   `json:"focus,omitempty" jsonschema_description:"Subdirectory path or glob to limit scope (e.g. internal/auth, **/*.go), or space-separated keywords (e.g. 'auth handler')"`
-	Mode      string   `json:"mode,omitempty" jsonschema_description:"quick (GitHub Code Search, no clone) | raw (code fragments without summary). Default: full AST analysis."`
-	Depth     string   `json:"depth,omitempty" jsonschema_description:"Analysis depth: overview (compact) | module (balanced, default) | deep (all files, all symbols)"`
-	Type      string   `json:"type,omitempty" jsonschema_description:"Search type: pr (pull requests) or issue (GitHub issues). Switches to GitHub Issues Search API."`
-	Repos     []string `json:"repos,omitempty" jsonschema_description:"Multiple repos for quick mode (e.g. ['owner/repo1','owner/repo2'])"`
-	Pattern   string   `json:"pattern,omitempty" jsonschema_description:"File include pattern for filtering"`
-	Language  string   `json:"language,omitempty" jsonschema_description:"Filter quick-mode code search to this language (e.g. go, python)"`
-	Format    string   `json:"format,omitempty" jsonschema_description:"Output format: xml (default, structured for AI agents) | text (human-readable) | json (structured envelope)"`
-	MaxRepoMB int      `json:"max_repo_mb,omitempty" jsonschema_description:"Per-request override for the total ingested-source cap in MiB (deep mode). >0 overrides the MAX_REPO_MB default (250); 0/omitted uses the default. Raise it to fully index a large repo, lower it to bound a huge one."`
+	Repo      string   `json:"repo" jsonschema:"GitHub repo slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
+	Query     string   `json:"query" jsonschema:"What to search for / analyze in the repository"`
+	Ref       string   `json:"ref,omitempty" jsonschema:"Branch, tag, or commit SHA (default: HEAD)"`
+	Focus     string   `json:"focus,omitempty" jsonschema:"Subdirectory path or glob to limit scope (e.g. internal/auth, **/*.go), or space-separated keywords (e.g. 'auth handler')"`
+	Mode      string   `json:"mode,omitempty" jsonschema:"quick (GitHub Code Search, no clone) | raw (code fragments without summary). Default: full AST analysis."`
+	Depth     string   `json:"depth,omitempty" jsonschema:"Analysis depth: overview (compact) | module (balanced, default) | deep (all files, all symbols)"`
+	Type      string   `json:"type,omitempty" jsonschema:"Search type: pr (pull requests) or issue (GitHub issues). Switches to GitHub Issues Search API."`
+	Repos     []string `json:"repos,omitempty" jsonschema:"Multiple repos for quick mode (e.g. ['owner/repo1','owner/repo2'])"`
+	Pattern   string   `json:"pattern,omitempty" jsonschema:"File include pattern for filtering"`
+	Language  string   `json:"language,omitempty" jsonschema:"Filter quick-mode code search to this language (e.g. go, python)"`
+	Format    string   `json:"format,omitempty" jsonschema:"Output format: xml (default, structured for AI agents) | text (human-readable) | json (structured envelope)"`
+	MaxRepoMB int      `json:"max_repo_mb,omitempty" jsonschema:"Per-request override for the total ingested-source cap in MiB (deep mode). >0 overrides the MAX_REPO_MB default (250); 0/omitted uses the default. Raise it to fully index a large repo, lower it to bound a huge one."`
 }
 
 // registerRepoAnalyze registers the repo_analyze MCP tool.

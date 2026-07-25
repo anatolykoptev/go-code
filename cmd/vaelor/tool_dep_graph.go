@@ -22,29 +22,29 @@ type xmlDepGraph struct {
 // DepGraphInput is the input schema for the dep_graph tool.
 type DepGraphInput struct {
 	// Repo is the GitHub repo slug (owner/repo) or local filesystem path.
-	Repo string `json:"repo" jsonschema_description:"GitHub repo slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
+	Repo string `json:"repo" jsonschema:"GitHub repo slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
 
 	// Type selects what to graph: imports (file-level), packages, modules, or calls (function call graph).
-	Type string `json:"type,omitempty" jsonschema_description:"Graph type: imports | packages | modules | calls (default: packages)"`
+	Type string `json:"type,omitempty" jsonschema:"Graph type: imports | packages | modules | calls (default: packages)"`
 
 	// Format controls output: json (adjacency list), dot (Graphviz), mermaid, or summary.
-	Format string `json:"format,omitempty" jsonschema_description:"Output format: json | dot | mermaid | summary (default: mermaid)"`
+	Format string `json:"format,omitempty" jsonschema:"Output format: json | dot | mermaid | summary (default: mermaid)"`
 
 	// Focus limits the graph to a specific package or module.
-	Focus string `json:"focus,omitempty" jsonschema_description:"Package or subdirectory to focus on (e.g. internal/auth), or space-separated keywords (e.g. 'auth handler')"`
+	Focus string `json:"focus,omitempty" jsonschema:"Package or subdirectory to focus on (e.g. internal/auth), or space-separated keywords (e.g. 'auth handler')"`
 
 	// Depth limits graph traversal depth from focused node.
-	Depth int `json:"depth,omitempty" jsonschema_description:"Max traversal depth from focus node (default: 3, 0=unlimited)"`
+	Depth int `json:"depth,omitempty" jsonschema:"Max traversal depth from focus node (default: 3, 0=unlimited)"`
 
 	// MaxDepth is a deprecated alias for Depth.
-	MaxDepth int `json:"max_depth,omitempty" jsonschema_description:"Deprecated: use depth instead"`
+	MaxDepth int `json:"max_depth,omitempty" jsonschema:"Deprecated: use depth instead"`
 
 	// IncludeStdlib includes Go standard library imports in the graph.
-	IncludeStdlib bool `json:"include_stdlib,omitempty" jsonschema_description:"Include standard library imports in graph. Default false (stdlib excluded)."`
+	IncludeStdlib bool `json:"include_stdlib,omitempty" jsonschema:"Include standard library imports in graph. Default false (stdlib excluded)."`
 
 	// CrossLanguage includes cross-language API route connections between layers.
 	// Cross-language dependencies are available via code_graph polyglot_overview and layer_deps templates.
-	CrossLanguage bool `json:"cross_language,omitempty" jsonschema_description:"Include cross-language API route connections between layers"`
+	CrossLanguage bool `json:"cross_language,omitempty" jsonschema:"Include cross-language API route connections between layers"`
 }
 
 // registerDepGraph registers the dep_graph MCP tool.
