@@ -172,23 +172,41 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 	}
 	// Progressive result-shortening ladder (#685): try the full result with
 	// context, then matches without context, then a per-file count summary.
-	// PickFitting returns the first rendering that fits DefaultBudget; each
-	// rung is a complete, parseable XML envelope so the agent never receives
-	// a hard-truncated mid-document fragment. The addTool wrapper's Shape is
-	// then a no-op (the body already fits the budget).
+	// PickFitting returns the first rendering that fits DefaultBudget as
+	// `body`, plus the rung-1 (full) rendering as `full` (rendered at most
+	// once). Each rung is a complete, parseable XML envelope so the agent
+	// never receives a hard-truncated mid-document fragment. The addTool
+	// wrapper's Shape is then a no-op (the body already fits the budget).
 	mappings := deps.PathMappings
 	ladder := mcpmeta.Ladder{
 		{Name: "full", Render: func() string { return marshalSearchXML(formatCodeSearchXML(input, matches, mappings), env) }},
 		{Name: "no-context", Render: func() string { return marshalSearchXML(formatCodeSearchXMLNoContext(input, matches, mappings), env) }},
 		{Name: "counts", Render: func() string { return marshalSearchXML(formatCodeSearchXMLSummary(input, matches, mappings), env) }},
 	}
-	body := mcpmeta.PickFitting(ladder, mcpmeta.DefaultBudget)
-	if body == "" {
-		// Empty ladder result only happens on zero matches (all rungs render
-		// the same empty envelope) — fall back to the full rendering.
-		body = ladder[0].Render()
+	body, full := mcpmeta.PickFitting(ladder, mcpmeta.DefaultBudget)
+	// Rung 0 — file-save escape hatch: when the full rendering is too large
+	// to inline (> maxInlineCharsDefault) AND outputDir is set, persist the
+	// FULL rendering to a file and append a path pointer (as an XML comment
+	// so the envelope stays well-formed) so the agent can read everything
+	// via the Read tool. This is NOT an alternative to the ladder — both
+	// hold at once: the agent gets a valid budget-fitting rendering inline
+	// AND the full result is reachable on disk. When outputDir is empty, no
+	// file is written (same as the pre-#685 largeTextResult contract).
+	if outputDir != "" && len(full) > maxInlineCharsDefault {
+		if path, ok := saveToFile(full, "code_search", outputDir); ok {
+			body += fileSavePointer(len(full), path)
+		}
 	}
 	return textResult(body), nil
+}
+
+// fileSavePointer builds the XML-comment pointer appended to the inline body
+// when the full rendering is persisted to a file. It is an XML comment so the
+// envelope stays well-formed under a strict parser (same precedent as
+// appendMetaFooter). The sentinel prefix is greppable.
+func fileSavePointer(charCount int, path string) string {
+	return fmt.Sprintf("\n\n<!-- full-result: %d chars saved to: %s — Use Read tool to access the file. -->",
+		charCount, path)
 }
 
 // grepSearch runs grep via ox-codes with fallback to Go codesearch.

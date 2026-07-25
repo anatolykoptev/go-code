@@ -17,7 +17,7 @@ func TestPickFitting_FirstRungFits_ReturnsFirst(t *testing.T) {
 		{Name: "no-context", Render: func() string { called[1] = true; return "NC" }},
 		{Name: "counts", Render: func() string { called[2] = true; return "C" }},
 	}
-	got := PickFitting(l, 1000)
+	got, _ := PickFitting(l, 1000)
 	if !strings.Contains(got, "FULL-RENDER-CONTENT") {
 		t.Fatalf("first rung must be returned when it fits, got %q", got)
 	}
@@ -41,7 +41,7 @@ func TestPickFitting_OnlyThirdRungFits_ReturnsThird(t *testing.T) {
 		{Name: "counts", Render: func() string { return "47 matches across 6 files" }},
 	}
 	// Budget fits only rung 3 (counts) + its condensation note.
-	got := PickFitting(l, 80)
+	got, _ := PickFitting(l, 80)
 	if !strings.Contains(got, "47 matches across 6 files") {
 		t.Fatalf("third rung must be returned when only it fits, got %q", got)
 	}
@@ -68,7 +68,7 @@ func TestPickFitting_UnreachedRungClosureNeverCalled(t *testing.T) {
 		{Name: "counts", Render: func() string { reached3 = true; return "should-not-render" }},
 	}
 	// Budget fits rung 2 (no-context) but not rung 1 (full).
-	_ = PickFitting(l, 100)
+	_, _ = PickFitting(l, 100)
 	if reached3 {
 		t.Fatal("rung 3 closure must NEVER be called when rung 2 fits (laziness)")
 	}
@@ -87,7 +87,7 @@ func TestPickFitting_CondensationNoteAbsentOnFirst_PresentBelow(t *testing.T) {
 			{Name: "no-context", Render: func() string { return strings.Repeat("N", 80) }},
 			{Name: "counts", Render: func() string { return "counts-body" }},
 		}
-		got := PickFitting(l, budget)
+		got, _ := PickFitting(l, budget)
 		hasNote := strings.Contains(got, condensationNotePrefix)
 		if hasNote != wantNote {
 			t.Fatalf("budget=%d: note present=%v, want %v, got %q", budget, hasNote, wantNote, got)
@@ -99,7 +99,8 @@ func TestPickFitting_CondensationNoteAbsentOnFirst_PresentBelow(t *testing.T) {
 	// Budget fits rung 1 → no note.
 	check(t, 200, false, "")
 	// Budget fits rung 2 only → note naming "no-context".
-	check(t, 120, true, "no-context")
+	// (130: rung 2 = 80 + 42-byte comment note = 122 < 130 < 150 rung 1.)
+	check(t, 130, true, "no-context")
 	// Budget fits rung 3 only → note naming "counts".
 	check(t, 60, true, "counts")
 }
@@ -116,8 +117,10 @@ func TestPickFitting_NoRungFits_EmitsCutMarker(t *testing.T) {
 		{Name: "no-context", Render: func() string { return strings.Repeat("N", 200) }},
 		{Name: "counts", Render: func() string { return strings.Repeat("C", 100) }},
 	}
-	budget := 80
-	got := PickFitting(l, budget)
+	// Budget 90: no rung fits (300/200/100 all > 90), and the 82-byte cut
+	// marker fits (< 90) so the full marker with the rung name is emitted.
+	budget := 90
+	got, _ := PickFitting(l, budget)
 	if !strings.Contains(got, cutMarkerPrefix) {
 		t.Fatalf("last-resort must emit cut marker, got %q", got)
 	}
@@ -135,7 +138,7 @@ func TestPickFitting_NoRungFits_EmitsCutMarker(t *testing.T) {
 func TestPickFitting_SingleRungFits_ReturnsItNoNote(t *testing.T) {
 	t.Parallel()
 	l := Ladder{{Name: "only", Render: func() string { return "only-render" }}}
-	got := PickFitting(l, 100)
+	got, _ := PickFitting(l, 100)
 	if got != "only-render" {
 		t.Fatalf("single fitting rung must be returned verbatim, got %q", got)
 	}
@@ -146,7 +149,7 @@ func TestPickFitting_SingleRungFits_ReturnsItNoNote(t *testing.T) {
 func TestPickFitting_SingleRungDoesNotFit_EmitsCutMarker(t *testing.T) {
 	t.Parallel()
 	l := Ladder{{Name: "only", Render: func() string { return strings.Repeat("Z", 200) }}}
-	got := PickFitting(l, 80)
+	got, _ := PickFitting(l, 80)
 	if !strings.Contains(got, cutMarkerPrefix) {
 		t.Fatalf("oversized single rung must emit cut marker, got %q", got)
 	}
@@ -158,8 +161,49 @@ func TestPickFitting_SingleRungDoesNotFit_EmitsCutMarker(t *testing.T) {
 // TestPickFitting_EmptyLadder_ReturnsEmpty verifies the empty-ladder edge.
 func TestPickFitting_EmptyLadder_ReturnsEmpty(t *testing.T) {
 	t.Parallel()
-	if got := PickFitting(Ladder{}, 100); got != "" {
+	if got, _ := PickFitting(Ladder{}, 100); got != "" {
 		t.Fatalf("empty ladder must return empty string, got %q", got)
+	}
+}
+
+// TestPickFitting_FullReturnIsRung1Rendering verifies that the `full` return
+// value is always the rung-1 (fullest) rendering, regardless of which rung
+// was chosen as `body`. RED-on-revert: if PickFitting stops returning the
+// rung-1 rendering as `full`, the assertion fails.
+func TestPickFitting_FullReturnIsRung1Rendering(t *testing.T) {
+	t.Parallel()
+	l := Ladder{
+		{Name: "full", Render: func() string { return "FULL-RENDER-CONTENT" }},
+		{Name: "no-context", Render: func() string { return "NC" }},
+		{Name: "counts", Render: func() string { return "C" }},
+	}
+	// Budget forces a cheaper rung as body, but full must be rung 1.
+	body, full := PickFitting(l, 10)
+	if full != "FULL-RENDER-CONTENT" {
+		t.Fatalf("full must be rung-1 rendering, got %q (body=%q)", full, body)
+	}
+	// When rung 1 fits, body == full.
+	body, full = PickFitting(l, 1000)
+	if full != "FULL-RENDER-CONTENT" || body != "FULL-RENDER-CONTENT" {
+		t.Fatalf("when rung 1 fits, body and full must both be rung 1, got body=%q full=%q", body, full)
+	}
+}
+
+// TestPickFitting_Rung1RenderedAtMostOnce verifies the at-most-once guarantee:
+// rung 1's Render closure is invoked exactly once, even when a cheaper rung
+// is chosen as `body`. RED-on-revert: if PickFitting re-renders rung 1 to
+// produce `full`, the counter exceeds 1.
+func TestPickFitting_Rung1RenderedAtMostOnce(t *testing.T) {
+	t.Parallel()
+	rung1Calls := 0
+	l := Ladder{
+		{Name: "full", Render: func() string { rung1Calls++; return strings.Repeat("X", 300) }},
+		{Name: "no-context", Render: func() string { return "fits-here" }},
+		{Name: "counts", Render: func() string { return "C" }},
+	}
+	_, _ = PickFitting(l, 100)
+	if rung1Calls != 1 {
+		t.Fatalf("rung 1 Render must be called exactly once, got %d", rung1Calls)
 	}
 }
 
@@ -167,10 +211,10 @@ func TestPickFitting_EmptyLadder_ReturnsEmpty(t *testing.T) {
 func TestPickFitting_ZeroBudget_ReturnsEmpty(t *testing.T) {
 	t.Parallel()
 	l := Ladder{{Name: "only", Render: func() string { return "x" }}}
-	if got := PickFitting(l, 0); got != "" {
+	if got, _ := PickFitting(l, 0); got != "" {
 		t.Fatalf("zero budget must return empty, got %q", got)
 	}
-	if got := PickFitting(l, -1); got != "" {
+	if got, _ := PickFitting(l, -1); got != "" {
 		t.Fatalf("negative budget must return empty, got %q", got)
 	}
 }
