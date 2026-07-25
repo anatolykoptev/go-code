@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.59.8](https://github.com/anatolykoptev/vaelor/compare/v1.59.7...v1.59.8) (2026-07-25)
+
+
+### Fixed
+
+* **retrieval:** gate stale AGE graph in RRF path — self-heal + observability + dark drop ([#691](https://github.com/anatolykoptev/vaelor/issues/691)) ([#700](https://github.com/anatolykoptev/vaelor/issues/700)) ([46c72cf](https://github.com/anatolykoptev/vaelor/commit/46c72cfa2035391338c7d04cc10badbe095a3b31))
+
 ## [1.59.7](https://github.com/anatolykoptev/vaelor/compare/v1.59.6...v1.59.7) (2026-07-25)
 
 
