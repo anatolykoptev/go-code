@@ -2,6 +2,14 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.59.12](https://github.com/anatolykoptev/vaelor/compare/v1.59.11...v1.59.12) (2026-07-25)
+
+
+### Fixed
+
+* **embeddings:** dry-run reconcile on fast path, 3-way root resolution, pathless enumeration ([#711](https://github.com/anatolykoptev/vaelor/issues/711), [#714](https://github.com/anatolykoptev/vaelor/issues/714)) ([#719](https://github.com/anatolykoptev/vaelor/issues/719)) ([5bb470a](https://github.com/anatolykoptev/vaelor/commit/5bb470a7fa6ed9bc7760565ed03c750ea7a7e5db))
+* **mcpmeta:** wire outputDir into semantic_search and restore ladder laziness ([#685](https://github.com/anatolykoptev/vaelor/issues/685) part 2) ([#716](https://github.com/anatolykoptev/vaelor/issues/716)) ([ed510d3](https://github.com/anatolykoptev/vaelor/commit/ed510d325a05a074985a68b0e99bee1021e663a5))
+
 ## [1.59.11](https://github.com/anatolykoptev/vaelor/compare/v1.59.10...v1.59.11) (2026-07-25)
 
 
