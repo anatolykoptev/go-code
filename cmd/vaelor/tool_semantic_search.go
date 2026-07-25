@@ -89,6 +89,11 @@ type SemanticDeps struct {
 	// IndexRepoAsyncWithTool). Production leaves this nil and the guard uses
 	// deps.Pipeline directly.
 	pipelineInvalidatorSeam pipelineInvalidator
+	// indexedStateSeam is the no-results-branch test seam for the indexed-state
+	// check (#709): GetRepoState / GetStoredModel / CountEmbeddings. Production
+	// leaves this nil and the check falls back to deps.Store. Tests wire a fake
+	// to avoid a live Postgres pool.
+	indexedStateSeam indexedStateReader
 }
 
 // graphCandidatesFn is the function type for graph candidate generation,
@@ -279,10 +284,38 @@ func handleSemanticSearch(
 		return handleSemanticHits(softCtx, input, deps, repoKey, root, results, topK, maxDist, outputDir, t0)
 	}
 
-	// No results — start background indexing if not already running.
-	if deps.Pipeline != nil {
-		if deps.Pipeline.IsIndexing(repoKey) {
-			done, total, _ := deps.Pipeline.IndexProgress(repoKey)
+	// No results. Zero hits does NOT by itself mean "not indexed yet" (#709):
+	// a fully indexed repo with 12007 embeddings legitimately matches nothing
+	// for a query that describes no code in it. Before scheduling anything,
+	// consult the indexed state — the same code_repo_state / code_embeddings
+	// signals the freshness wrap and the same-SHA fast-path already read.
+	//
+	// Indexed verdict (genuine empty result, no index scheduled) requires ALL:
+	//   - a code_repo_state row with a non-empty head_sha, AND
+	//   - that head_sha matches the checkout's main-branch tip (the index is
+	//     keyed on main, not working-tree HEAD — mirrors WithFreshness), AND
+	//   - the stored embed_model matches the active model (or model tracking
+	//     is off — EmbedModel()=="", same gate as the stale-hit guard), AND
+	//   - CountEmbeddings > 0 (frozen-empty recovery, same gate as the
+	//     same-SHA fast-path).
+	// Any miss ⇒ fall through to the existing "indexing started, retry" path,
+	// which is correct for not-yet-indexed / stale-SHA / changed-model repos.
+	//
+	// Seams: pipelineInvalidatorSeam + indexedStateSeam are nil in production
+	// and resolve to deps.Pipeline / deps.Store. Tests wire fakes to avoid a
+	// live Postgres pool. Routing the no-results branch through the invalidator
+	// seam (instead of deps.Pipeline directly) makes it testable the same way
+	// the stale-hit guard already is, with byte-identical production behavior.
+	invalidator := deps.pipelineInvalidatorSeam
+	if invalidator == nil && deps.Pipeline != nil {
+		invalidator = deps.Pipeline
+	}
+	if invalidator != nil {
+		if repoIsIndexed(softCtx, deps, repoKey, root, invalidator.EmbedModel()) {
+			return semanticSearchNoMatchResponse(input), nil
+		}
+		if invalidator.IsIndexing(repoKey) {
+			done, total, _ := invalidator.IndexProgress(repoKey)
 			msg := "Repository is being indexed in the background. " +
 				semanticSearchGraphHint + " " + semanticSearchRetryHint
 			if total > 0 {
@@ -291,7 +324,7 @@ func handleSemanticSearch(
 			}
 			return semanticSearchIndexingResponse(input, msg), nil
 		}
-		deps.Pipeline.IndexRepoAsyncWithTool("semantic_search", repoKey, root)
+		invalidator.IndexRepoAsyncWithTool("semantic_search", repoKey, root)
 		return semanticSearchIndexingResponse(input,
 			"Repository indexing started in the background. "+
 				semanticSearchGraphHint+" "+semanticSearchRetryHint), nil
@@ -300,6 +333,61 @@ func handleSemanticSearch(
 	return textResult(buildStatusResponse(input, "not_indexed",
 		"No indexed code found and embedding pipeline is not configured. "+
 			"Ensure EMBED_URL is set and retry.")), nil
+}
+
+// repoIsIndexed reports whether the repo is genuinely indexed for repoKey, so
+// an empty vector-search result set can be returned as a real "no match"
+// instead of a false "indexing started, retry" promise (#709). It reuses the
+// existing state-reading helpers — Store.GetRepoState / GetStoredModel /
+// CountEmbeddings (the same ones WithFreshness and the same-SHA fast-path use)
+// and mcpmeta.MainBranchHeadSHA (the same live-SHA reader WithFreshness uses).
+// Never the second way to read that state.
+//
+// Cold-path guarantee: any read failure (no row, no git repo, transient DB
+// error) collapses to false — the caller falls through to the indexing path,
+// preserving the pre-#709 behavior for not-yet-indexed / unreadable repos.
+func repoIsIndexed(ctx context.Context, deps SemanticDeps, repoKey, root, activeModel string) bool {
+	stateReader := deps.indexedStateSeam
+	if stateReader == nil && deps.Store != nil {
+		stateReader = deps.Store
+	}
+	if stateReader == nil {
+		return false
+	}
+	storedSHA, err := stateReader.GetRepoState(ctx, repoKey)
+	if err != nil || storedSHA == "" {
+		return false
+	}
+	live, err := mcpmeta.MainBranchHeadSHA(root)
+	if err != nil || live == "" || live != storedSHA {
+		return false
+	}
+	// Model gate mirrors the stale-hit guard: only enforce when the pipeline
+	// tracks a model. A legacy pipeline (EmbedModel()=="") skips the check so
+	// a freshly-indexed repo with no model tracking is not falsely re-indexed.
+	if activeModel != "" {
+		if storedModel := stateReader.GetStoredModel(ctx, repoKey); storedModel != "" && storedModel != activeModel {
+			return false
+		}
+	}
+	n, err := stateReader.CountEmbeddings(ctx, repoKey)
+	if err != nil || n <= 0 {
+		return false
+	}
+	return true
+}
+
+// semanticSearchNoMatchResponse returns an explicit no-match result for a repo
+// that IS indexed but whose embeddings matched the query. It does NOT bump the
+// "indexing" cold-return counter (this is a normal answer, not a cold start)
+// and does NOT schedule a background index. The message tells the caller
+// plainly that the repo is indexed and the query matched nothing, and suggests
+// actions that can actually change the outcome — not a retry that cannot.
+func semanticSearchNoMatchResponse(input SemanticSearchInput) *mcp.CallToolResult {
+	return textResult(buildStatusResponse(input, "no_match",
+		"Repository is indexed but the query matched nothing. "+
+			"Widen the query, drop the language= filter, or raise max_distance. "+
+			"A retry will not change this result."))
 }
 
 // handleSemanticHits handles the path where semantic search returned results:

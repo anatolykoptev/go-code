@@ -84,10 +84,25 @@ type pipelineInvalidator interface {
 	IndexProgress(repoKey string) (done, total int, running bool)
 }
 
+// indexedStateReader is the subset of *embeddings.Store needed by the
+// no-results branch of handleSemanticSearch to decide whether an empty result
+// set means "genuinely no match" (repo is indexed) vs "not indexed yet"
+// (#709). It reuses the same state-reading helpers the freshness wrap and
+// the same-SHA fast-path already use — GetRepoState (code_repo_state.head_sha),
+// GetStoredModel (code_repo_state.embed_model), CountEmbeddings
+// (code_embeddings row count) — never a second way to read that state.
+// *embeddings.Store satisfies it; tests inject a fake via indexedStateSeam.
+type indexedStateReader interface {
+	GetRepoState(ctx context.Context, repoKey string) (string, error)
+	GetStoredModel(ctx context.Context, repoKey string) string
+	CountEmbeddings(ctx context.Context, repoKey string) (int, error)
+}
+
 // Compile-time assertions: concrete types satisfy the seam interfaces.
 var _ modelChecker = (*embeddings.Store)(nil)
 var _ perRowModelChecker = (*embeddings.Store)(nil)
 var _ pipelineInvalidator = (*embeddings.Pipeline)(nil)
+var _ indexedStateReader = (*embeddings.Store)(nil)
 
 // semanticSuggest runs a trigram fuzzy name match as fallback when the primary
 // tool found no symbol. Uses pg_trgm on code_embeddings.symbol_name (GIN

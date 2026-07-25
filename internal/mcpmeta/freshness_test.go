@@ -117,12 +117,12 @@ func TestWithFreshness_EmptyIndexedSilent(t *testing.T) {
 //
 // RED reasoning: pre-fix, WithFreshness called LiveHead which returns the
 // feature commit SHA. That != mainSHA, so StaleWarning was populated —
-// a false alarm on every feature-branch checkout. Post-fix, mainBranchHeadSHA
+// a false alarm on every feature-branch checkout. Post-fix, MainBranchHeadSHA
 // returns the main-branch tip == indexedSHA → silent.
 func TestWithFreshness_FeatureBranchSilentWhenMainMatches(t *testing.T) {
 	t.Parallel()
 	dir := mkRepo(t) // one commit on main
-	mainSHA, err := mainBranchHeadSHA(dir)
+	mainSHA, err := MainBranchHeadSHA(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
