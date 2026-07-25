@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.60.0](https://github.com/anatolykoptev/vaelor/compare/v1.59.13...v1.60.0) (2026-07-25)
+
+
+### Added
+
+* **mcpmeta:** adopt the result-shortening ladder in understand and impact_analysis ([#730](https://github.com/anatolykoptev/vaelor/issues/730)) ([1dbf9d5](https://github.com/anatolykoptev/vaelor/commit/1dbf9d57a02db684a84858ccc2b38229d36a222e))
+
 ## [1.59.13](https://github.com/anatolykoptev/vaelor/compare/v1.59.12...v1.59.13) (2026-07-25)
 
 
