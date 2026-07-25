@@ -105,16 +105,16 @@ func buildCallTraceStatusResponse(input CallTraceInput, status, message string) 
 
 // CallTraceInput is the input schema for the call_trace tool.
 type CallTraceInput struct {
-	Repo      string `json:"repo" jsonschema_description:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
-	Symbol    string `json:"symbol" jsonschema_description:"Function or method name to trace (e.g. CompareRepos, Server.Serve)"`
-	Depth     int    `json:"depth,omitempty" jsonschema_description:"Max trace depth (default 5, max 10)"`
-	Direction string `json:"direction,omitempty" jsonschema_description:"Trace direction: callees (what does X call?) or callers (who calls X?). Default: callees"`
-	Focus     string `json:"focus,omitempty" jsonschema_description:"Subdirectory path to limit scope (e.g. internal/auth), or space-separated keywords (e.g. 'auth handler')"`
-	Language  string `json:"language,omitempty" jsonschema_description:"Limit to files of this language (e.g. go, python)"`
-	Compact   bool   `json:"compact,omitempty" jsonschema_description:"When true, return only the call tree without LLM narrative (faster, fewer tokens)"`
+	Repo      string `json:"repo" jsonschema:"Repository: GitHub slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /home/user/src/project)"`
+	Symbol    string `json:"symbol" jsonschema:"Function or method name to trace (e.g. CompareRepos, Server.Serve)"`
+	Depth     int    `json:"depth,omitempty" jsonschema:"Max trace depth (default 5, max 10)"`
+	Direction string `json:"direction,omitempty" jsonschema:"Trace direction: callees (what does X call?) or callers (who calls X?). Default: callees"`
+	Focus     string `json:"focus,omitempty" jsonschema:"Subdirectory path to limit scope (e.g. internal/auth), or space-separated keywords (e.g. 'auth handler')"`
+	Language  string `json:"language,omitempty" jsonschema:"Limit to files of this language (e.g. go, python)"`
+	Compact   bool   `json:"compact,omitempty" jsonschema:"When true, return only the call tree without LLM narrative (faster, fewer tokens)"`
 
-	FieldAccess bool `json:"field_access,omitempty" jsonschema_description:"When true, include heuristic argument-reference call sites (struct field accesses, identifier args) as callees even when they don't resolve to a known function — legacy permissive behaviour. Default false: only true call expressions and resolved function references are reported."`
-	Refresh     bool `json:"refresh,omitempty" jsonschema_description:"When true, bypass the in-memory call graph cache and force a full re-parse with SCIP/go/types enrichment. Use after git checkout or new commits when the cache is stale. Slower but fresh."`
+	FieldAccess bool `json:"field_access,omitempty" jsonschema:"When true, include heuristic argument-reference call sites (struct field accesses, identifier args) as callees even when they don't resolve to a known function — legacy permissive behaviour. Default false: only true call expressions and resolved function references are reported."`
+	Refresh     bool `json:"refresh,omitempty" jsonschema:"When true, bypass the in-memory call graph cache and force a full re-parse with SCIP/go/types enrichment. Use after git checkout or new commits when the cache is stale. Slower but fresh."`
 }
 
 type callTraceOutput struct {

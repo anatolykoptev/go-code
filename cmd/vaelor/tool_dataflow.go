@@ -21,40 +21,40 @@ import (
 
 // DataflowInput is the input schema for the dataflow_analyze tool.
 type DataflowInput struct {
-	Repo        string           `json:"repo" jsonschema_description:"Repository: GitHub slug, URL, or absolute local path"`
-	Language    string           `json:"language,omitempty" jsonschema_description:"Language to analyze (go, python, typescript, javascript, rust). Auto-detected if omitted."`
-	Focus       string           `json:"focus,omitempty" jsonschema_description:"Analysis mode — one of: \"all\" (default), \"quality\" (dead stores, unused vars), \"security\" (taint/injection). NOT a file path; to scope to a file, use file_glob."`
-	FileGlob    string           `json:"file_glob,omitempty" jsonschema_description:"Include only files matching glob"`
-	ExcludeGlob string           `json:"exclude_glob,omitempty" jsonschema_description:"Exclude files matching glob"`
-	Rules       []TaintRuleInput `json:"rules,omitempty" jsonschema_description:"Custom taint-tracking rules (JSON array). When omitted, built-in SQL/command injection rules are used. Each rule: {id, sources:[{pattern,tag}], sinks:[{pattern,arg_index,cwe,description}], sanitizers:[{pattern}], severity}"`
-	Limit       int              `json:"limit,omitempty" jsonschema_description:"Maximum findings per section (quality, security, dead functions). Default 50. Use offset to paginate."`
-	Offset      int              `json:"offset,omitempty" jsonschema_description:"Skip the first N findings in each section (for pagination). Use with limit to page through large result sets."`
-	MaxBytes    int              `json:"max_bytes,omitempty" jsonschema_description:"Response budget in bytes (default 8192). When the response exceeds this, the ranked head is returned with a continuation footer."`
+	Repo        string           `json:"repo" jsonschema:"Repository: GitHub slug, URL, or absolute local path"`
+	Language    string           `json:"language,omitempty" jsonschema:"Language to analyze (go, python, typescript, javascript, rust). Auto-detected if omitted."`
+	Focus       string           `json:"focus,omitempty" jsonschema:"Analysis mode — one of: \"all\" (default), \"quality\" (dead stores, unused vars), \"security\" (taint/injection). NOT a file path; to scope to a file, use file_glob."`
+	FileGlob    string           `json:"file_glob,omitempty" jsonschema:"Include only files matching glob"`
+	ExcludeGlob string           `json:"exclude_glob,omitempty" jsonschema:"Exclude files matching glob"`
+	Rules       []TaintRuleInput `json:"rules,omitempty" jsonschema:"Custom taint-tracking rules (JSON array). When omitted, built-in SQL/command injection rules are used. Each rule: {id, sources:[{pattern,tag}], sinks:[{pattern,arg_index,cwe,description}], sanitizers:[{pattern}], severity}"`
+	Limit       int              `json:"limit,omitempty" jsonschema:"Maximum findings per section (quality, security, dead functions). Default 50. Use offset to paginate."`
+	Offset      int              `json:"offset,omitempty" jsonschema:"Skip the first N findings in each section (for pagination). Use with limit to page through large result sets."`
+	MaxBytes    int              `json:"max_bytes,omitempty" jsonschema:"Response budget in bytes (default 8192). When the response exceeds this, the ranked head is returned with a continuation footer."`
 }
 
 // TaintRuleInput is the MCP input schema for a custom taint rule.
 type TaintRuleInput struct {
-	ID         string             `json:"id" jsonschema_description:"Rule identifier (e.g. 'log-injection')"`
-	Sources    []TaintSourceInput `json:"sources" jsonschema_description:"Taint sources — where tainted data originates"`
-	Sinks      []TaintSinkInput   `json:"sinks" jsonschema_description:"Taint sinks — where tainted data must not flow"`
-	Sanitizers []SanitizerInput   `json:"sanitizers,omitempty" jsonschema_description:"Functions that neutralize tainted data"`
-	Severity   string             `json:"severity" jsonschema_description:"Severity level: 'high', 'medium', 'low'"`
+	ID         string             `json:"id" jsonschema:"Rule identifier (e.g. 'log-injection')"`
+	Sources    []TaintSourceInput `json:"sources" jsonschema:"Taint sources — where tainted data originates"`
+	Sinks      []TaintSinkInput   `json:"sinks" jsonschema:"Taint sinks — where tainted data must not flow"`
+	Sanitizers []SanitizerInput   `json:"sanitizers,omitempty" jsonschema:"Functions that neutralize tainted data"`
+	Severity   string             `json:"severity" jsonschema:"Severity level: 'high', 'medium', 'low'"`
 }
 
 type TaintSourceInput struct {
-	Pattern string `json:"pattern" jsonschema_description:"Function/method pattern that produces tainted data (e.g. 'req.URL.Query')"`
-	Tag     string `json:"tag" jsonschema_description:"Taint tag label (e.g. 'user-input')"`
+	Pattern string `json:"pattern" jsonschema:"Function/method pattern that produces tainted data (e.g. 'req.URL.Query')"`
+	Tag     string `json:"tag" jsonschema:"Taint tag label (e.g. 'user-input')"`
 }
 
 type TaintSinkInput struct {
-	Pattern     string `json:"pattern" jsonschema_description:"Function/method pattern that must not receive tainted data (e.g. 'os.OpenFile')"`
-	ArgIndex    int    `json:"arg_index" jsonschema_description:"Index of the argument to check (0-based)"`
-	CWE         string `json:"cwe,omitempty" jsonschema_description:"CWE identifier (e.g. 'CWE-22')"`
-	Description string `json:"description,omitempty" jsonschema_description:"Human-readable description of the vulnerability"`
+	Pattern     string `json:"pattern" jsonschema:"Function/method pattern that must not receive tainted data (e.g. 'os.OpenFile')"`
+	ArgIndex    int    `json:"arg_index" jsonschema:"Index of the argument to check (0-based)"`
+	CWE         string `json:"cwe,omitempty" jsonschema:"CWE identifier (e.g. 'CWE-22')"`
+	Description string `json:"description,omitempty" jsonschema:"Human-readable description of the vulnerability"`
 }
 
 type SanitizerInput struct {
-	Pattern string `json:"pattern" jsonschema_description:"Function/method that neutralizes taint (e.g. 'filepath.Clean')"`
+	Pattern string `json:"pattern" jsonschema:"Function/method that neutralizes taint (e.g. 'filepath.Clean')"`
 }
 
 // XML response types.

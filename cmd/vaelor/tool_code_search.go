@@ -17,22 +17,22 @@ import (
 
 // CodeSearchInput is the input schema for the code_search tool.
 type CodeSearchInput struct {
-	Repo          string `json:"repo,omitempty" jsonschema_description:"REQUIRED (first argument). Repository to search: GitHub slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /host/src/<name>). When omitted, it is inferred only if an absolute path/file argument lies inside a known indexed checkout — otherwise the call fails."`
-	Pattern       string `json:"pattern,omitempty" jsonschema_description:"Search pattern (literal string or regex). Use pattern or query."`
-	Query         string `json:"query,omitempty" jsonschema_description:"Alias for pattern — use either query or pattern"`
-	IsRegex       bool   `json:"is_regex,omitempty" jsonschema_description:"Treat pattern as regular expression (default: literal)"`
-	FileGlob      string `json:"file_glob,omitempty" jsonschema_description:"File glob filter (e.g. '*.go', '*.py')"`
-	Path          string `json:"path,omitempty" jsonschema_description:"Directory path filter — alias for file_glob (e.g. 'internal/query'). Converted to file_glob automatically."`
-	Language      string `json:"language,omitempty" jsonschema_description:"Limit search to files of this language (e.g. go, python, typescript)"`
-	ContextLines  int    `json:"context_lines,omitempty" jsonschema_description:"Number of context lines before/after each match (default: 2)"`
-	MaxResults    int    `json:"max_results,omitempty" jsonschema_description:"Maximum number of matches to return (default: 50, max: 200)"`
-	CaseSensitive *bool  `json:"case_sensitive,omitempty" jsonschema_description:"Case-sensitive matching (default: true). Set false for case-insensitive."`
-	ExcludeGlob   string `json:"exclude_glob,omitempty" jsonschema_description:"Comma-separated glob patterns to exclude files (e.g. 'docs/*,vendor/*'). Matches against relative paths."`
-	Scope         string `json:"scope,omitempty" jsonschema_description:"AST scope filter: function_bodies, comments, strings, type_definitions, imports. Requires language."`
-	Structural    bool   `json:"structural,omitempty" jsonschema_description:"Treat pattern as structural AST pattern with $WILDCARDS (e.g. 'if $ERR != nil { return $ERR }'). Requires language."`
-	Expand        string `json:"expand,omitempty" jsonschema_description:"Expand matches to enclosing AST symbol: 'function' (enclosing function/method) or 'block' (function/struct/class/impl). Returns full symbol body."`
-	MaxTokens     int    `json:"max_tokens,omitempty" jsonschema_description:"Maximum token budget for expanded bodies. Matches exceeding this are skipped. Estimate: 1 token ≈ 4 chars."`
-	IncludeBody   bool   `json:"include_body,omitempty" jsonschema_description:"Return the enclosing declaration body for each match (≈80 line cap per match). Convenience alias for expand=\"function\" with a bounded body budget."`
+	Repo          string `json:"repo,omitempty" jsonschema:"Repository to search: GitHub slug (owner/repo), full GitHub URL, or absolute local host path (e.g. /host/src/<name>). Not schema-required: when omitted, the handler infers it from the path argument if it lies inside a known indexed checkout — otherwise the call fails with a short error naming recent repos."`
+	Pattern       string `json:"pattern,omitempty" jsonschema:"Primary search term — a literal string or regex (controlled by is_regex). This is what grep matches against; it is NOT a semantic query. If both pattern and query are supplied, pattern wins and query is silently ignored. At least one of pattern/query must be non-empty after normalization or the call errors with 'pattern is required'."`
+	Query         string `json:"query,omitempty" jsonschema:"Alias for pattern — used only when pattern is empty (normalizeCodeSearchInput copies query into pattern). Neither pattern nor query is semantic; semantic search is a FALLBACK that triggers automatically when the literal/regex grep returns zero matches, not a mode you select via this parameter."`
+	IsRegex       bool   `json:"is_regex,omitempty" jsonschema:"Treat pattern as regular expression (default: literal)"`
+	FileGlob      string `json:"file_glob,omitempty" jsonschema:"File glob filter (e.g. '*.go', '*.py')"`
+	Path          string `json:"path,omitempty" jsonschema:"Directory path filter — alias for file_glob (e.g. 'internal/query'). Converted to file_glob automatically."`
+	Language      string `json:"language,omitempty" jsonschema:"Limit search to files of this language (e.g. go, python, typescript)"`
+	ContextLines  int    `json:"context_lines,omitempty" jsonschema:"Number of context lines before/after each match (default: 2)"`
+	MaxResults    int    `json:"max_results,omitempty" jsonschema:"Maximum number of matches to return (default: 50, max: 200)"`
+	CaseSensitive *bool  `json:"case_sensitive,omitempty" jsonschema:"Case-sensitive matching (default: true). Set false for case-insensitive."`
+	ExcludeGlob   string `json:"exclude_glob,omitempty" jsonschema:"Comma-separated glob patterns to exclude files (e.g. 'docs/*,vendor/*'). Matches against relative paths."`
+	Scope         string `json:"scope,omitempty" jsonschema:"AST scope filter: function_bodies, comments, strings, type_definitions, imports. Requires language."`
+	Structural    bool   `json:"structural,omitempty" jsonschema:"Treat pattern as structural AST pattern with $WILDCARDS (e.g. 'if $ERR != nil { return $ERR }'). Requires language."`
+	Expand        string `json:"expand,omitempty" jsonschema:"Expand matches to enclosing AST symbol: 'function' (enclosing function/method) or 'block' (function/struct/class/impl). Returns full symbol body."`
+	MaxTokens     int    `json:"max_tokens,omitempty" jsonschema:"Maximum token budget for expanded bodies. Matches exceeding this are skipped. Estimate: 1 token ≈ 4 chars."`
+	IncludeBody   bool   `json:"include_body,omitempty" jsonschema:"Return the enclosing declaration body for each match (≈80 line cap per match). Convenience alias for expand=\"function\" with a bounded body budget."`
 }
 
 type xmlSearchResponse struct {
@@ -69,7 +69,7 @@ func registerCodeSearch(server *mcp.Server, cfg Config, deps analyze.Deps, sem *
 	addTool(server, &mcp.Tool{
 		Name: "code_search",
 		Description: "Search for code patterns within a repository. " +
-			"REQUIRED first argument: \"repo\" (owner/repo or /host/src/<name>) — the call fails without it unless an absolute path argument infers the repo. " +
+			"\"repo\" (owner/repo or /host/src/<name>) is inferred from the path argument when omitted — the call fails only if inference fails. " +
 			"Supports literal strings and regular expressions. " +
 			"Returns matching lines with file paths, line numbers, and surrounding context. " +
 			"Use for finding: TODO comments, error messages, function calls, string literals, " +

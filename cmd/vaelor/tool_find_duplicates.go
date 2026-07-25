@@ -35,16 +35,16 @@ var tierOrder = []string{dupTierExact, dupTierVeryClose, dupTierRelated}
 
 // FindDuplicatesInput is the input schema for the find_duplicates tool.
 type FindDuplicatesInput struct {
-	Repo            string  `json:"repo" jsonschema_description:"Repository path or identifier to scan for intra-repo semantic duplicates (GitHub slug, full URL, or absolute local path)"`
-	IncludeSameFile bool    `json:"include_same_file,omitempty" jsonschema_description:"Include same-file near-duplicates (default false — overloads and helpers in the same file are excluded)"`
-	Tier            string  `json:"tier,omitempty" jsonschema_description:"Filter output to a single tier: exact | very-close | related (default: all tiers)"`
-	Limit           int     `json:"limit,omitempty" jsonschema_description:"Maximum number of duplicate groups to report (default 20)"`
-	Offset          int     `json:"offset,omitempty" jsonschema_description:"Skip the first N groups (for pagination). Use with limit to page through large result sets."`
-	Language        string  `json:"language,omitempty" jsonschema_description:"Restrict to symbols in files of this language (e.g. go, python, typescript). Inferred from file extension."`
-	MinLines        int     `json:"min_lines,omitempty" jsonschema_description:"Drop groups where any symbol's body is shorter than this many lines (best-effort brace scan from the symbol's start line)."`
-	Threshold       float64 `json:"threshold,omitempty" jsonschema_description:"Minimum average similarity (0.0-1.0) to report a group. Exact-tier groups (sim=1.0) always pass."`
-	Path            string  `json:"path,omitempty" jsonschema_description:"Restrict to symbols whose file path is under this directory (relative to repo root, e.g. \"internal/query\")."`
-	MaxBytes        int     `json:"max_bytes,omitempty" jsonschema_description:"Response budget in bytes (default 8192). When the response exceeds this, the ranked head is returned with a continuation footer."`
+	Repo            string  `json:"repo" jsonschema:"Repository path or identifier to scan for intra-repo semantic duplicates (GitHub slug, full URL, or absolute local path)"`
+	IncludeSameFile bool    `json:"include_same_file,omitempty" jsonschema:"Include same-file near-duplicates (default false — overloads and helpers in the same file are excluded)"`
+	Tier            string  `json:"tier,omitempty" jsonschema:"Filter output to a single tier: exact | very-close | related (default: all tiers)"`
+	Limit           int     `json:"limit,omitempty" jsonschema:"Maximum number of duplicate groups to report (default 20)"`
+	Offset          int     `json:"offset,omitempty" jsonschema:"Skip the first N groups (for pagination). Use with limit to page through large result sets."`
+	Language        string  `json:"language,omitempty" jsonschema:"Restrict to symbols in files of this language (e.g. go, python, typescript). Inferred from file extension."`
+	MinLines        int     `json:"min_lines,omitempty" jsonschema:"Drop groups where any symbol's body is shorter than this many lines (best-effort brace scan from the symbol's start line)."`
+	Threshold       float64 `json:"threshold,omitempty" jsonschema:"Minimum average similarity (0.0-1.0) to report a group. Exact-tier groups (sim=1.0) always pass."`
+	Path            string  `json:"path,omitempty" jsonschema:"Restrict to symbols whose file path is under this directory (relative to repo root, e.g. \"internal/query\")."`
+	MaxBytes        int     `json:"max_bytes,omitempty" jsonschema:"Response budget in bytes (default 8192). When the response exceeds this, the ranked head is returned with a continuation footer."`
 }
 
 // registerFindDuplicates registers the find_duplicates MCP tool.
