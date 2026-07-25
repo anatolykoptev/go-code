@@ -86,13 +86,17 @@ func packedRefSHA(commonDir, ref string) string {
 	return ""
 }
 
-// mainBranchHeadSHA returns the SHA of the repo's main branch
+// MainBranchHeadSHA returns the SHA of the repo's main branch
 // (refs/heads/main → refs/heads/master → HEAD fallback), without spawning
 // git. This mirrors the embed pipeline's repoMainBranchSHA fingerprint:
 // the index is keyed on the main branch, so freshness must compare against
 // main's tip, not the working-tree HEAD (which on a feature branch would
 // never match the main-keyed index → permanent false stale warning).
-func mainBranchHeadSHA(repoRoot string) (string, error) {
+//
+// Returns ("", error) when the path is not a git repo or no ref resolves —
+// callers treat this as "cannot confirm indexed" and fall through to the
+// indexing path rather than declaring a genuine empty result (#709).
+func MainBranchHeadSHA(repoRoot string) (string, error) {
 	gd, err := gitDir(repoRoot)
 	if err != nil {
 		return "", err
@@ -198,9 +202,9 @@ func isHex(s string) bool {
 // comparing against the working-tree HEAD would false-warn on every feature
 // branch. Silent on match.
 func WithFreshness(env Envelope, repoRoot, indexedSHA string) Envelope {
-	live, err := mainBranchHeadSHA(repoRoot)
+	live, err := MainBranchHeadSHA(repoRoot)
 	if err != nil {
-		slog.Debug("mcpmeta.mainBranchHeadSHA failed",
+		slog.Debug("mcpmeta.MainBranchHeadSHA failed",
 			"repo_root", repoRoot,
 			"err", err,
 		)
