@@ -288,6 +288,23 @@ func (p *Pipeline) claimIndexSlot(repoKey string) (prog *indexProgress, release 
 	return prog, release, true
 }
 
+// ClaimIndexSlot is the exported wrapper around claimIndexSlot for callers
+// outside the embeddings package — specifically orphan_sweep, which must
+// reserve the per-repoKey single-flight slot before deleting a candidate
+// repoKey's embeddings so it cannot race a first index that is committing
+// chunks but has not yet written its code_repo_state row (#741).
+//
+// Returns (release, true) if the slot was claimed — the caller MUST call
+// release when done (it sets running=false and deletes the slot, freeing the
+// repoKey for a future index). Returns (nil, false) if an indexer already owns
+// the slot; the caller MUST NOT delete that repoKey's rows and must record it
+// as excluded. A leaked release blocks that repoKey from ever indexing again
+// for the process lifetime, so callers must defer it per-key.
+func (p *Pipeline) ClaimIndexSlot(repoKey string) (release func(), won bool) {
+	_, release, won = p.claimIndexSlot(repoKey)
+	return release, won
+}
+
 // IndexRepoAsyncWithTool starts background indexing if not already running, with
 // tool attribution for observability. Returns true if indexing was started, false
 // if already in progress.

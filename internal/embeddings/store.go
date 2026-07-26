@@ -626,6 +626,53 @@ func (s *Store) CountOrphanRepoKeys(ctx context.Context) (int64, error) {
 	return n, err
 }
 
+// orphanRepoKeyForRepoPredicate is the per-repoKey form of
+// orphanRepoKeyPredicate: the same set-difference AND a repo_key equality
+// filter. CountOrphanRepoKeysForRepo and DeleteOrphanRepoKeysForRepo both
+// reference it so the per-key count and the per-key delete can never diverge
+// — the same invariant orphanRepoKeyPredicate enforces for the bulk paths
+// (see the 15076-row incident documented at store.go:549-554). The sweep's
+// in-flight guard is applied per-key by the handler; these methods are the
+// per-key SQL surface the guard drives, and they share the orphan predicate
+// so a future change to one cannot silently disagree with the other.
+const orphanRepoKeyForRepoPredicate = orphanRepoKeyPredicate + " AND repo_key = $1"
+
+// CountOrphanRepoKeysForRepo returns the number of code_embeddings rows for
+// repoKey that have no matching code_repo_state row. Used by the orphan_sweep
+// handler so the per-key preview (dry-run "rows that would be deleted for
+// this key") and the per-key delete report the same number — the guard for
+// requirement 1 of #741 applied to the per-key path.
+func (s *Store) CountOrphanRepoKeysForRepo(ctx context.Context, repoKey string) (int64, error) {
+	if err := s.EnsureSchema(ctx); err != nil {
+		return 0, err
+	}
+	var n int64
+	err := s.pool.QueryRow(ctx,
+		"SELECT COUNT(*) FROM public.code_embeddings WHERE "+orphanRepoKeyForRepoPredicate, repoKey).Scan(&n)
+	return n, err
+}
+
+// DeleteOrphanRepoKeysForRepo removes the code_embeddings rows for a single
+// repoKey that have no matching code_repo_state row. It is the per-key
+// counterpart of DeleteOrphanRepoKeys, used by the orphan_sweep handler once
+// it has claimed the index slot for repoKey (so an in-flight first index
+// cannot have its not-yet-state-row-committed chunks deleted underneath it).
+// Shares orphanRepoKeyForRepoPredicate with CountOrphanRepoKeysForRepo so the
+// per-key delete set and the per-key count can never diverge.
+//
+// Returns the number of orphan embedding rows deleted for this repoKey.
+func (s *Store) DeleteOrphanRepoKeysForRepo(ctx context.Context, repoKey string) (int64, error) {
+	if err := s.EnsureSchema(ctx); err != nil {
+		return 0, err
+	}
+	ct, err := s.pool.Exec(ctx,
+		"DELETE FROM public.code_embeddings WHERE "+orphanRepoKeyForRepoPredicate, repoKey)
+	if err != nil {
+		return 0, fmt.Errorf("DeleteOrphanRepoKeysForRepo: %w", err)
+	}
+	return ct.RowsAffected(), nil
+}
+
 // GetEmbedModelForRepo returns the embed_model stored in code_embeddings for
 // repoKey (reading from any row for that repo_key), or "" when no rows exist
 // or on error. Used as a fallback by the semantic_search stale-space guard
