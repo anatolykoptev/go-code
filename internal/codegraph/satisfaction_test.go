@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/anatolykoptev/vaelor/internal/callgraph"
+	"github.com/anatolykoptev/vaelor/internal/goanalysis"
 	"github.com/anatolykoptev/vaelor/internal/parser"
 )
 
@@ -93,8 +94,14 @@ func TestImplementsEdgeKeysMatchSymbolGraph(t *testing.T) {
 	writeTinyForgeModule(t, root)
 
 	// Real index path: go/types satisfaction → TypeRelationship with an ABSOLUTE
-	// FileSet TypeFile (not a synthetic literal).
-	rels := callgraph.ExtractGoImplements(context.Background(), root)
+	// FileSet TypeFile (not a synthetic literal). The caller owns the load and
+	// passes the *LoadResult through the seam (issue #747); ExtractGoImplements
+	// no longer loads go/packages itself.
+	lr, err := goanalysis.LoadPackages(context.Background(), root, goanalysis.LoadOpts{})
+	if err != nil {
+		t.Fatalf("goanalysis.LoadPackages: %v", err)
+	}
+	rels := callgraph.ExtractGoImplements(context.Background(), root, lr)
 	if len(rels) == 0 {
 		t.Fatal("callgraph.ExtractGoImplements produced no IMPLEMENTS relationships (go/types load failed or found no satisfaction)")
 	}

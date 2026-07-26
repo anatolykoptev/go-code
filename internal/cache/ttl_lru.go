@@ -16,9 +16,10 @@ import (
 // (mu.Lock → lru.Get → lazy-expiry-delete → return / mu.Lock → lru.Set with
 // a time.Now() stamp, repeated four times) — new TTL+LRU call sites should
 // use this instead of hand-rolling a fifth copy. The four pre-existing sites
-// are left as-is here (separate migration, tracked as debt); this type
-// exists so the newest call site (goanalysis.CachedLoadPackages) doesn't add
-// a fifth.
+// are left as-is here (separate migration, tracked as debt). (A fifth call
+// site, goanalysis.CachedLoadPackages, was removed in issue #747 — it pinned
+// the go/types arena for the cache TTL and OOM-killed the indexer; the load
+// is now passed through the request seam instead of cached globally.)
 //
 // Unlike the plain LRU (which pushes its mutex to the caller), TTLLRU holds
 // its own — every method here is safe for concurrent use.

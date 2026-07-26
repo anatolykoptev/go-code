@@ -16,7 +16,6 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/anatolykoptev/vaelor/internal/goanalysis"
 	"github.com/anatolykoptev/vaelor/internal/ingest"
 	"github.com/anatolykoptev/vaelor/internal/parser"
 	sciplib "github.com/sourcegraph/scip/bindings/go/scip"
@@ -330,13 +329,25 @@ func main() { F(Opts{}) }
 	}
 }
 
-// TestTryGoTypesResolution_WarnOnFailure verifies that tryGoTypesResolution
-// emits a slog.Warn when packages.Load fails (e.g. no go.mod present).
-// This gives operators a "why is my repo stuck at basic tier" signal.
-func TestTryGoTypesResolution_WarnOnFailure(t *testing.T) {
-	// A bare directory with no go.mod forces packages.Load to fail.
+// TestEnrichWithTypedResolution_LoadFailWarn verifies that the composition
+// seam emits a slog.Warn when the go/packages load it owns fails (e.g. no
+// go.mod present). This gives operators a "why is my repo stuck at basic
+// tier" signal. tryGoTypesResolution no longer loads go/packages itself
+// (issue #747: the load moved up to the seam and the *LoadResult is passed
+// through), so the warn moved with it — this test exercises the new seam
+// rather than the old tryGoTypesResolution load path. The assertion itself
+// (a warn containing "go/packages load failed" on a failing packages.Load) is
+// unchanged; only the call site moved.
+func TestEnrichWithTypedResolution_LoadFailWarn(t *testing.T) {
+	// A go.mod with a syntax error: HasGoModule is true (the file exists) so
+	// EnrichWithTypedResolution enters the go/types branch, but packages.Load
+	// fails at go.mod parse time.
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main(){}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/loadwarn\n\ngo 1.21\n\nthis is not valid go.mod syntax\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -346,14 +357,12 @@ func TestTryGoTypesResolution_WarnOnFailure(t *testing.T) {
 	slog.SetDefault(logger)
 	defer slog.SetDefault(prev)
 
-	// tempdir has no go.mod — LoadPackages errors immediately on missing module
-	// file, before any context check is reached.
-	result, err := tryGoTypesResolution(context.Background(), dir, nil)
-	if result != nil {
-		t.Error("expected nil result for failing packages.Load")
-	}
-	if err == nil {
-		t.Error("expected non-nil error for failing packages.Load")
+	cg := EnrichWithTypedResolution(context.Background(), dir,
+		&CallGraph{Tier: "basic", Backend: BackendTreeSitter},
+		[]*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		nil)
+	if !cg.Warming {
+		t.Error("expected Warming=true on failing packages.Load")
 	}
 
 	got := buf.String()
@@ -472,11 +481,6 @@ func main() {}
 		t.Fatal(err)
 	}
 
-	// Evict any stale cache entry from a prior test against the same root path.
-	// t.TempDir() gives a unique path, but the singleflight + negative-cache
-	// in goanalysis is keyed by root — clear it to be safe.
-	goanalysis.InvalidateCachedLoad(dir)
-
 	base := &CallGraph{
 		Edges:   []CallEdge{{CalleeName: "useMissing"}},
 		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
@@ -535,8 +539,6 @@ func main() {
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	goanalysis.InvalidateCachedLoad(dir)
 
 	base := &CallGraph{
 		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
@@ -598,8 +600,6 @@ func main() {}
 		t.Fatal(err)
 	}
 
-	goanalysis.InvalidateCachedLoad(dir)
-
 	base := &CallGraph{
 		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
 		Tier:    "basic",
@@ -644,7 +644,6 @@ func TestWarmGoTypesCache_NoPrewarmBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	goanalysis.InvalidateCachedLoad(dir)
 	InvalidateBuildCache()
 
 	var buf bytes.Buffer
@@ -722,7 +721,6 @@ func main() {}
 		t.Fatal(err)
 	}
 
-	goanalysis.InvalidateCachedLoad(dir)
 	InvalidateBuildCache()
 
 	key := cgCacheKey(TraceRepoInput{Root: dir})
@@ -738,10 +736,9 @@ func main() {}
 	}
 	cgCache.set(key, seeded, dir)
 
-	// Run the background warm synchronously. The retry invalidates the
-	// negative-cached cold failure, re-runs packages.Load (now succeeds on
-	// the tiny module), gets zero typed call edges, and must refresh the
-	// cached entry: clear Warming and restore IMPLEMENTS.
+	// Run the background warm synchronously. The retry re-runs packages.Load
+	// (now succeeds on the tiny module), gets zero typed call edges, and must
+	// refresh the cached entry: clear Warming and restore IMPLEMENTS.
 	warmGoTypesCache(dir, seeded.Symbols, key)
 
 	got, ok := cgCache.get(key, dir)
@@ -790,7 +787,6 @@ func TestWarmGoTypesCache_ColdFailThenFailedWarm_PreservesCacheAndRecordsFailed(
 		t.Fatal(err)
 	}
 
-	goanalysis.InvalidateCachedLoad(dir)
 	InvalidateBuildCache()
 
 	key := cgCacheKey(TraceRepoInput{Root: dir})
@@ -875,7 +871,6 @@ func main() {}`
 		t.Fatal(err)
 	}
 
-	goanalysis.InvalidateCachedLoad(dir)
 	InvalidateBuildCache()
 
 	key := cgCacheKey(TraceRepoInput{Root: dir})
@@ -1072,9 +1067,6 @@ func TestEnrichWithTypedResolution_ColdGo_SCIPSucceeds_PreservesWarming(t *testi
 	// returns the same edges (the cached index is a copy of what the fake
 	// indexer produced), so the test remains valid.
 
-	// Evict any stale goanalysis cache for this root.
-	goanalysis.InvalidateCachedLoad(dir)
-
 	// Construct the ingest.File list for language detection. trySCIPResolution
 	// uses this to detect languages; the actual indexing runs against the dir.
 	files := []*ingest.File{
@@ -1145,7 +1137,6 @@ func main() {}`
 		t.Fatal(err)
 	}
 
-	goanalysis.InvalidateCachedLoad(dir)
 	InvalidateBuildCache()
 	// Clean package-level state from prior tests.
 	goTypesWarmingSet.Delete(dir)
@@ -1221,7 +1212,6 @@ func TestBuildFromRepo_SiblingKey_FailedWarm_PreservesHonestWarmingNote(t *testi
 		t.Fatal(err)
 	}
 
-	goanalysis.InvalidateCachedLoad(dir)
 	InvalidateBuildCache()
 	goTypesWarmingSet.Delete(dir)
 	goTypesWarmedSet.Delete(dir)
@@ -1299,7 +1289,6 @@ func main() {
 		t.Fatal(err)
 	}
 
-	goanalysis.InvalidateCachedLoad(dir)
 	InvalidateBuildCache()
 	goTypesWarmingSet.Delete(dir)
 	goTypesWarmedSet.Delete(dir)
@@ -1379,7 +1368,6 @@ func TestBuildFromRepo_DivertTerminatesAfterFailedRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	goanalysis.InvalidateCachedLoad(dir)
 	InvalidateBuildCache()
 	goTypesWarmingSet.Delete(dir)
 	goTypesWarmedSet.Delete(dir)
@@ -1444,7 +1432,6 @@ func TestBuildFromRepo_EntryCachedAfterWarm_NotDiverted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	goanalysis.InvalidateCachedLoad(dir)
 	InvalidateBuildCache()
 	goTypesWarmingSet.Delete(dir)
 	goTypesWarmedSet.Delete(dir)

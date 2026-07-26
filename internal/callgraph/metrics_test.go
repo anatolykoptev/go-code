@@ -2,6 +2,8 @@ package callgraph
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -64,14 +66,29 @@ func TestGotypesFallbackCounter_DeadlineReason(t *testing.T) {
 // TestGotypesFallbackCounter_LoadErrorReason verifies that a plain load failure
 // (not a deadline) records reason="load_error".
 //
-// RED guarantee: remove recordGotypesFallback from tryGoTypesResolution → counter
-// stays flat → assertion fails.
+// RED guarantee: remove recordGotypesFallback from EnrichWithTypedResolution's
+// load-error branch → counter stays flat → assertion fails. (The call moved
+// out of tryGoTypesResolution in issue #747: the load moved up to the
+// composition seam, so the fallback counter is bumped there now.)
 func TestGotypesFallbackCounter_LoadErrorReason(t *testing.T) {
 	before := gatherCounterSum(t, "gocode_callgraph_gotypes_fallback_total",
 		map[string]string{"reason": "load_error"})
 
-	// An empty temp dir has no Go module; packages.Load returns a non-deadline error.
-	tryGoTypesResolution(context.Background(), t.TempDir(), nil)
+	// A go.mod with a syntax error: HasGoModule is true (the file exists) so
+	// EnrichWithTypedResolution enters the go/types branch, but packages.Load
+	// fails at go.mod parse time with a non-deadline error. EnrichWithTyped
+	// Resolution owns the load (issue #747) and bumps recordGotypesFallback on
+	// its failure branch.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/loaderror\n\ngo 1.21\n\nthis is not valid go.mod syntax\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	EnrichWithTypedResolution(context.Background(), dir,
+		&CallGraph{Tier: "basic", Backend: BackendTreeSitter}, nil, nil)
 
 	after := gatherCounterSum(t, "gocode_callgraph_gotypes_fallback_total",
 		map[string]string{"reason": "load_error"})
