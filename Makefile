@@ -6,7 +6,14 @@ COMPOSE = cd $(HOME)/deploy/example-server && docker compose
 # .git is absent (e.g. Docker build with .git in .dockerignore) or no tags
 # are reachable. The Dockerfile passes VERSION as a build arg from CI.
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
-LDFLAGS  = -s -w -X main.version=$(VERSION)
+
+# GIT_SHA is the commit SHA baked into gocode_build_info's git_sha label.
+# Kept in sync with the Docker path (OXPULSE_GIT_SHA build arg → main.buildSHA)
+# so `make build` and the container agree. Falls back to "unknown" when .git
+# is absent; resolveBuildSHAFrom rejects that placeholder and drops to
+# vcs.revision / version / "unknown" as appropriate.
+GIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+LDFLAGS  = -s -w -X main.version=$(VERSION) -X main.buildSHA=$(GIT_SHA)
 
 .PHONY: build lint fmt-check test test-short govulncheck preflight run deploy clean vendor
 

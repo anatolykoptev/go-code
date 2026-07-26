@@ -16,10 +16,22 @@ WORKDIR /build
 # the container; the build arg is the only reliable source.
 ARG VERSION=dev
 
+# OXPULSE_GIT_SHA is injected by dozor on every compose build
+# (internal/deploy/queue_steps.go, unconditional). Without this ARG Docker
+# discards the provenance at the image boundary and gocode_build_info reports
+# git_sha="unknown". The "OXPULSE_" prefix is the legacy fleet-wide name for
+# any dozor-built service — renaming would break every existing consumer.
+# Routed into a dedicated main.buildSHA var (NOT main.version, which means the
+# release tag); resolveBuildSHAFrom prefers it over the vcs.revision that
+# cannot exist here because .git is excluded.
+ARG OXPULSE_GIT_SHA=unknown
+
 # Copy vendored dependencies + source together (vendor-only go-kit packages
 # require -mod=vendor; go mod download would rewrite go.mod and break vendor sync).
 COPY . .
-RUN CGO_ENABLED=1 go build -mod=vendor -ldflags="-s -w -X main.version=${VERSION}" -o vaelor ./cmd/vaelor
+RUN CGO_ENABLED=1 go build -mod=vendor \
+	-ldflags="-s -w -X main.version=${VERSION} -X main.buildSHA=${OXPULSE_GIT_SHA}" \
+	-o vaelor ./cmd/vaelor
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM golang:1.26.3-alpine
