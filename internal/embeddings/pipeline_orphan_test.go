@@ -235,6 +235,101 @@ func TestPreviewOrphanRepoKeys_IdempotentOnClean(t *testing.T) {
 	assert.Len(t, rows, 1, "live repo row must survive preview")
 }
 
+// -- Store.CountOrphanRepoKeysForRepo / DeleteOrphanRepoKeysForRepo tests (#741) --
+
+// TestCountOrphanRepoKeysForRepo_OrphanCount is the per-key count guard: an
+// orphan repo_key (no state row) reports its seeded row count; a live
+// repo_key (with state row) reports 0.
+//
+// Falsifiable: reverting orphanRepoKeyForRepoPredicate to drop the NOT IN
+// clause makes the live repo report 1 → assert.EqualValues(0, live) fails.
+// Dropping the repo_key = $1 filter makes the orphan count include other
+// repos' rows → assert.EqualValues(3, orphan) fails.
+func TestCountOrphanRepoKeysForRepo_OrphanCount(t *testing.T) {
+	s := testStore(t)
+	const orphanRepo = "test/perkey-count-orphan"
+	const liveRepo = "test/perkey-count-live"
+	cleanRepo(t, s, orphanRepo)
+	cleanRepo(t, s, liveRepo)
+	ctx := context.Background()
+
+	insertSymbols(t, s, orphanRepo, "file.go", []string{"A", "B", "C"})
+	insertSymbols(t, s, liveRepo, "file.go", []string{"Live"})
+	require.NoError(t, s.SetRepoState(ctx, liveRepo, "abc", ""))
+
+	orphan, err := s.CountOrphanRepoKeysForRepo(ctx, orphanRepo)
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, orphan, "orphan repo_key must report its 3 seeded rows")
+
+	live, err := s.CountOrphanRepoKeysForRepo(ctx, liveRepo)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, live, "live repo_key (state row present) must report 0 orphan rows")
+}
+
+// TestDeleteOrphanRepoKeysForRepo_DeletesOnlyThatKey is the per-key delete
+// guard and the #741 requirement-1 guard for the per-key path: count and
+// delete share orphanRepoKeyForRepoPredicate, so the count reported before
+// the delete must equal the rows the delete removes, and the delete must be
+// scoped to the single repo_key (a sibling orphan repo_key must survive).
+//
+// Falsifiable: reverting the repo_key = $1 filter makes the per-key delete
+// wipe the sibling's rows → assert.Len(siblingRows, 2) fails. Diverging the
+// count predicate from the delete predicate makes count != deleted →
+// assert.EqualValues(orphanCount, deleted) fails.
+func TestDeleteOrphanRepoKeysForRepo_DeletesOnlyThatKey(t *testing.T) {
+	s := testStore(t)
+	const target = "test/perkey-delete-target"
+	const sibling = "test/perkey-delete-sibling"
+	cleanRepo(t, s, target)
+	cleanRepo(t, s, sibling)
+	ctx := context.Background()
+
+	insertSymbols(t, s, target, "file.go", []string{"T1", "T2"})
+	insertSymbols(t, s, sibling, "file.go", []string{"S1", "S2"})
+
+	// Both are orphans (no state rows). The per-key count for target must
+	// equal the per-key delete for target (shared predicate).
+	orphanCount, err := s.CountOrphanRepoKeysForRepo(ctx, target)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, orphanCount)
+
+	deleted, err := s.DeleteOrphanRepoKeysForRepo(ctx, target)
+	require.NoError(t, err)
+	assert.EqualValues(t, orphanCount, deleted,
+		"per-key count and per-key delete must agree (shared orphanRepoKeyForRepoPredicate)")
+
+	// Target rows gone.
+	targetRows, err := s.GetSymbolsForFile(ctx, target, "file.go")
+	require.NoError(t, err)
+	assert.Empty(t, targetRows, "target repo_key rows must be deleted")
+
+	// Sibling orphan rows MUST survive — the per-key delete is scoped.
+	siblingRows, err := s.GetSymbolsForFile(ctx, sibling, "file.go")
+	require.NoError(t, err)
+	assert.Len(t, siblingRows, 2, "sibling orphan repo_key must NOT be touched by a per-key delete on target")
+}
+
+// TestDeleteOrphanRepoKeysForRepo_LiveRepoUntouched verifies the per-key
+// delete respects the NOT IN (state) clause: a live repo_key with a state row
+// reports 0 deleted and its rows survive.
+func TestDeleteOrphanRepoKeysForRepo_LiveRepoUntouched(t *testing.T) {
+	s := testStore(t)
+	const live = "test/perkey-delete-live"
+	cleanRepo(t, s, live)
+	ctx := context.Background()
+
+	insertSymbols(t, s, live, "file.go", []string{"L1"})
+	require.NoError(t, s.SetRepoState(ctx, live, "sha", ""))
+
+	deleted, err := s.DeleteOrphanRepoKeysForRepo(ctx, live)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, deleted, "live repo_key must report 0 deleted")
+
+	rows, err := s.GetSymbolsForFile(ctx, live, "file.go")
+	require.NoError(t, err)
+	assert.Len(t, rows, 1, "live repo_key rows must survive the per-key delete")
+}
+
 // -- Pipeline.IndexRepo intra-key reconciliation integration test --
 
 // TestIndexRepo_OrphanDeletedOnFullReindex is the end-to-end falsifiable guard
