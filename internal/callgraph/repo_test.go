@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -1344,5 +1345,142 @@ func main() {
 	}
 	if !hasImplements {
 		t.Error("expected at least one IMPLEMENTS edge on warm's own key (ExtractGoImplements runs on the warm path)")
+	}
+}
+
+// TestBuildFromRepo_DivertTerminatesAfterFailedRebuild is the loop-guard
+// RED test for the round-8 fix on issue #735. Round 7 diverts a cache hit to
+// a full rebuild when the entry has Warming=true and the root is in
+// goTypesWarmedSet. Its three tests all cover the case where the rebuild
+// SUCCEEDS, so Warming comes back false and the next request is a normal
+// hit. The untested branch: the rebuild FAILS typed resolution again. Then
+// Warming=true is re-cached, the root is still in goTypesWarmedSet (which
+// never evicts), and the next request diverts again — forever. Round 7
+// turns a bounded 5-minute stale note into an unbounded full rebuild on
+// EVERY request for that scope, for the process lifetime.
+//
+// This test seeds a Warming=true entry whose at predates the warm
+// completion, with a broken go.mod so typed resolution keeps failing. Two
+// BuildFromRepo calls: the first must rebuild (divert), the second must be
+// a cache hit (not diverted). Discriminate on pointer identity — a rebuild
+// produces a fresh *CallGraph, a cache hit returns the same pointer. On
+// 0584b60f the second call diverts again → different pointer → RED.
+func TestBuildFromRepo_DivertTerminatesAfterFailedRebuild(t *testing.T) {
+	dir := t.TempDir()
+
+	// Broken go.mod — packages.Load fails on both sync and background paths,
+	// so the rebuild's typed resolution fails and the re-cached entry keeps
+	// Warming=true. Round 7's FailedWarm test uses the same shape.
+	gomod := "module example.com/loopguard\n\ngo 1.21\n\nthis is not valid go.mod syntax\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+	InvalidateBuildCache()
+	goTypesWarmingSet.Delete(dir)
+	goTypesWarmedSet.Delete(dir)
+	t.Cleanup(func() {
+		goTypesWarmedSet.Delete(dir)
+		goTypesWarmingSet.Delete(dir)
+	})
+
+	key := cgCacheKey(TraceRepoInput{Root: dir})
+
+	// Seed a Warming=true entry (at = t0). This is the "stale" entry —
+	// cached before the warm completed.
+	seed := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic", Backend: BackendTreeSitter, Warming: true,
+	}
+	cgCache.set(key, seed, dir)
+
+	// Mark the root as warmed (warmedAt = t1 > t0). Simulates a successful
+	// warm that completed at some earlier point — the root is genuinely warm
+	// even though this scope's typed resolution will fail (e.g. request-path
+	// timeout under load, issue #735).
+	goTypesWarmedSet.Store(dir, time.Now())
+
+	// Call 1: entry at (t0) predates warmedAt (t1) → divert → rebuild.
+	// The rebuild fails typed resolution (broken go.mod) → re-caches with
+	// Warming=true and a fresh at (t2 > t1).
+	first, err := BuildFromRepo(context.Background(), TraceRepoInput{Root: dir})
+	if err != nil {
+		t.Fatalf("BuildFromRepo call 1: %v", err)
+	}
+
+	// Call 2: entry at (t2) is AFTER warmedAt (t1) → NOT diverted → cache
+	// hit. On 0584b60f this diverts again → rebuild → different pointer.
+	second, err := BuildFromRepo(context.Background(), TraceRepoInput{Root: dir})
+	if err != nil {
+		t.Fatalf("BuildFromRepo call 2: %v", err)
+	}
+
+	// Pointer identity: a cache hit returns the same *CallGraph; a rebuild
+	// produces a fresh one. This is the only reliable discriminator — a
+	// rebuild can produce an equal-looking graph.
+	if first != second {
+		t.Errorf("expected call 2 to be a cache hit (same pointer as call 1); got different pointers — first=%p second=%p (round-8 loop guard: the divert must terminate after one rebuild, not repeat forever)", first, second)
+	}
+}
+
+// TestBuildFromRepo_EntryCachedAfterWarm_NotDiverted pins the round-8
+// invariant in its own right: an entry cached AFTER the warm completed is
+// never diverted, even with Warming=true. The "stale" predicate is "cached
+// before the warm completed" (entry.at predates warmedAt), not "Warming
+// flag is set". An entry re-cached after a failed rebuild carries a fresh
+// at — it is not stale, and diverting it would loop forever.
+func TestBuildFromRepo_EntryCachedAfterWarm_NotDiverted(t *testing.T) {
+	dir := t.TempDir()
+
+	gomod := "module example.com/afterwarm\n\ngo 1.21\n\nthis is not valid go.mod syntax\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+	InvalidateBuildCache()
+	goTypesWarmingSet.Delete(dir)
+	goTypesWarmedSet.Delete(dir)
+	t.Cleanup(func() {
+		goTypesWarmedSet.Delete(dir)
+		goTypesWarmingSet.Delete(dir)
+	})
+
+	// Mark the root as warmed FIRST (warmedAt = t_warm).
+	goTypesWarmedSet.Store(dir, time.Now())
+
+	key := cgCacheKey(TraceRepoInput{Root: dir})
+
+	// Seed a Warming=true entry AFTER the warm (at = t_entry > t_warm).
+	// This is the post-rebuild state: typed resolution failed again, the
+	// entry was re-cached with Warming=true and a fresh at.
+	seed := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic", Backend: BackendTreeSitter, Warming: true,
+	}
+	cgCache.set(key, seed, dir)
+
+	// BuildFromRepo: cache hit with Warming=true, but entry.at is AFTER
+	// warmedAt → not stale → NOT diverted → returned as-is.
+	cg, err := BuildFromRepo(context.Background(), TraceRepoInput{Root: dir})
+	if err != nil {
+		t.Fatalf("BuildFromRepo: %v", err)
+	}
+
+	// Pointer identity: the cache hit must return the seeded *CallGraph,
+	// not a rebuilt one.
+	if cg != seed {
+		t.Errorf("expected cache hit (same pointer as seed %p); got %p — entry cached AFTER warm was diverted (round-8 invariant: only entries cached BEFORE the warm are stale)", seed, cg)
+	}
+	// Warming must still be true — the entry is returned as-is.
+	if !cg.Warming {
+		t.Error("expected Warming=true preserved (entry cached after warm is not diverted)")
 	}
 }
