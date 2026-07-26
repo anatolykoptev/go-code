@@ -102,7 +102,8 @@ func (c *Cache) setInternal(ctx context.Context, key string, data []byte, l1TTL,
 		// Write-through to L2 (best-effort).
 		if c.l2 != nil {
 			if err := c.l2.Set(ctx, key, data, l2TTL); err != nil {
-				slog.Debug("cache: L2 set failed", slog.Any("error", err))
+				slog.Warn("cache: L2 set failed", slog.String("key", key), slog.Any("error", err))
+				c.l2errors.Add(1)
 			}
 		}
 		return
@@ -156,7 +157,8 @@ func (c *Cache) setInternal(ctx context.Context, key string, data []byte, l1TTL,
 	// Write-through to L2 (best-effort).
 	if c.l2 != nil {
 		if err := c.l2.Set(ctx, key, data, l2TTL); err != nil {
-			slog.Debug("cache: L2 set failed", slog.Any("error", err))
+			slog.Warn("cache: L2 set failed", slog.String("key", key), slog.Any("error", err))
+			c.l2errors.Add(1)
 		}
 	}
 }
@@ -180,7 +182,8 @@ func (c *Cache) Delete(ctx context.Context, key string) {
 	// Delete from L2 (best-effort).
 	if c.l2 != nil {
 		if err := c.l2.Del(ctx, key); err != nil {
-			slog.Debug("cache: L2 del failed", slog.Any("error", err))
+			slog.Warn("cache: L2 del failed", slog.String("key", key), slog.Any("error", err))
+			c.l2errors.Add(1)
 		}
 	}
 }
