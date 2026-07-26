@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.62.0](https://github.com/anatolykoptev/vaelor/compare/v1.61.2...v1.62.0) (2026-07-26)
+
+
+### Added
+
+* register net/http/pprof on the metrics listener (9897) ([#757](https://github.com/anatolykoptev/vaelor/issues/757)) ([4314c80](https://github.com/anatolykoptev/vaelor/commit/4314c804a9ff11d1156697e5af85fd682b100d13))
+
 ## [1.61.2](https://github.com/anatolykoptev/vaelor/compare/v1.61.1...v1.61.2) (2026-07-26)
 
 
