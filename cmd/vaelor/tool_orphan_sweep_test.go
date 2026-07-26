@@ -71,15 +71,6 @@ func (f *fakeOrphanSweepStore) CountOrphanRepoKeys(ctx context.Context) (int64, 
 	return f.countResult, f.countErr
 }
 
-func (f *fakeOrphanSweepStore) DeleteOrphanRepoKeys(ctx context.Context) (int64, error) {
-	// Legacy bulk path — retained for the interface but the guarded sweep no
-	// longer calls it. Tests assert it is NOT called.
-	f.perKeyCallsMu.Lock()
-	defer f.perKeyCallsMu.Unlock()
-	f.deletedKeys = append(f.deletedKeys, "__bulk__")
-	return f.countResult, nil
-}
-
 func (f *fakeOrphanSweepStore) CountOrphanRepoKeysForRepo(ctx context.Context, repoKey string) (int64, error) {
 	f.perKeyCallsMu.Lock()
 	defer f.perKeyCallsMu.Unlock()
@@ -196,10 +187,14 @@ func TestHandleOrphanSweep_ExplicitDryRunTrue(t *testing.T) {
 // on main (the in-flight key's rows are deleted and it is not reported as
 // excluded).
 //
-// Falsifiable: revert the guard (handler ignores the claimer and calls the
-// bulk DeleteOrphanRepoKeys, or deletes per-key without checking won) →
-// fake.deletedKeys contains "test/inflight" and the response no longer
-// contains "excluded_in_flight=1".
+// Falsifiable: revert the guard (handler deletes per-key without checking
+// won) → fake.deletedKeys contains "test/inflight" and the response no longer
+// contains "excluded_in_flight=1". The "handler calls the bulk
+// DeleteOrphanRepoKeys" arm this note previously described can no longer be
+// armed: DeleteOrphanRepoKeys was removed from the handler's
+// orphanSweepStore interface (finding 2), so reverting to a bulk delete would
+// not compile — the type makes that regression impossible, which is the
+// point of narrowing the interface.
 func TestHandleOrphanSweep_InFlightKeyExcludedNotDeleted(t *testing.T) {
 	dry := false
 	fake := &fakeOrphanSweepStore{
@@ -388,4 +383,62 @@ func TestHandleOrphanSweep_DryRunPreviewErrorPropagates(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, fake.deletedKeys, "a preview error must NOT trigger a delete")
 	assert.True(t, strings.Contains(err.Error(), "preview"), "error must mention the preview step")
+}
+
+// TestHandleOrphanSweep_NilClaimerRefusesDelete is the fail-closed guard for
+// finding 1: when the in-flight guard is not wired (nil claimer), the
+// destructive dry_run=false path must refuse and delete NOTHING. A guard whose
+// only job is to prevent silent data_loss must fail closed (stop the
+// destruction), not fail open (proceed without it). The shipped wiring always
+// passes deps.Pipeline, so this branch is unreachable in production — which is
+// exactly why it must be tested: an unreachable branch is never exercised, so
+// if the wiring changes, this is discovered by a test, not by missing rows.
+//
+// The refusal is a Go error (the handler's existing failure convention — every
+// other failure in handleOrphanSweep returns nil, fmt.Errorf(...)), which the
+// MCP framework surfaces as IsError=true. It is logged at slog.Error.
+//
+// Falsifiable on round 1 (a86844ea): the nil-tolerant claimOrSkip returned
+// won=true for every candidate, so the handler deleted all of them and
+// returned a success result — fake.deletedKeys was non-empty and no error was
+// returned.
+func TestHandleOrphanSweep_NilClaimerRefusesDelete(t *testing.T) {
+	dry := false
+	fake := &fakeOrphanSweepStore{
+		previewKeys: []string{"test/orphan-a", "test/orphan-b"},
+		previewRows: 15076,
+		perKeyRows:  map[string]int64{"test/orphan-a": 7000, "test/orphan-b": 8076},
+		countResult: 2,
+	}
+
+	res, err := handleOrphanSweep(context.Background(), OrphanSweepInput{DryRun: &dry}, fake, nil)
+	require.Error(t, err, "nil claimer on the destructive path must refuse, not delete unguarded")
+	require.Nil(t, res, "refusal must not return a success result")
+	assert.Empty(t, fake.deletedKeys, "nil claimer must delete NOTHING — no per-key deletes")
+	assert.Contains(t, err.Error(), "in-flight guard",
+		"refusal text must name the missing guard so the operator can see why")
+}
+
+// TestHandleOrphanSweep_NilClaimerDryRunStillWorks is the regression guard for
+// finding 1's fail-closed fix: a nil claimer must NOT corrupt the dry-run
+// preview path. A preview mutates nothing and needs no guard, so it must still
+// work and report the candidates. This prevents the over-correction of
+// refusing on the dry-run path too.
+func TestHandleOrphanSweep_NilClaimerDryRunStillWorks(t *testing.T) {
+	fake := &fakeOrphanSweepStore{
+		previewKeys: []string{"test/orphan-a", "test/orphan-b"},
+		previewRows: 15076,
+		perKeyRows:  map[string]int64{"test/orphan-a": 7000, "test/orphan-b": 8076},
+	}
+
+	res, err := handleOrphanSweep(context.Background(), OrphanSweepInput{}, fake, nil)
+	require.NoError(t, err, "dry run with nil claimer must NOT refuse — a preview mutates nothing")
+	require.False(t, res.IsError)
+
+	assert.Equal(t, 1, fake.previewCalls, "dry run must still invoke the preview path")
+	assert.Empty(t, fake.deletedKeys, "dry run must NOT delete anything")
+
+	text := textContentOf(t, res)
+	assert.Contains(t, text, "DRY RUN")
+	assert.Contains(t, text, "orphan_repo_keys=2")
 }

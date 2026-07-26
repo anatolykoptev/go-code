@@ -33,10 +33,18 @@ type OrphanSweepInput struct {
 // They share orphanRepoKeyForRepoPredicate so the per-key count and the
 // per-key delete can never diverge (the same invariant the bulk
 // orphanRepoKeyPredicate enforces — see store.go:549-554).
+//
+// The bulk DeleteOrphanRepoKeys is deliberately ABSENT from this narrowed
+// view: the guarded handler deletes per-key only (claim → count → delete per
+// candidate). A bulk delete cannot be guarded per-key, so keeping it off the
+// handler's interface makes the unguarded bulk-delete path uncallable by
+// construction — a type-level guard is stronger than a test that asserts
+// "nobody calls this". The store method itself stays on *embeddings.Store
+// (internal/embeddings/store.go:573) with its own tests; only the handler's
+// narrowed view drops it.
 type orphanSweepStore interface {
 	CountOrphanRepoKeys(ctx context.Context) (int64, error)
 	PreviewOrphanRepoKeys(ctx context.Context) (repoKeys []string, rowCount int64, err error)
-	DeleteOrphanRepoKeys(ctx context.Context) (int64, error)
 	CountOrphanRepoKeysForRepo(ctx context.Context, repoKey string) (int64, error)
 	DeleteOrphanRepoKeysForRepo(ctx context.Context, repoKey string) (int64, error)
 }
@@ -52,10 +60,14 @@ type orphanSweepStore interface {
 //
 // This closes the #741 race in both directions with no schema change and no
 // new state: an age filter cannot do that — it narrows a window; this removes
-// it. A nil claimer (no Pipeline wired) disables the guard and the sweep
-// falls back to the legacy per-key delete without exclusion reporting — this
+// it. A nil claimer (no Pipeline wired) is REFUSED on the destructive path:
+// the handler deletes nothing and returns an error naming the missing guard
+// (fail-closed — a guard whose only job is to prevent silent data_loss must
+// stop the destruction when it is absent, not proceed without it). The dry
+// run is unaffected: a preview mutates nothing and needs no guard. This
 // branch never ships that way (registerOrphanSweep passes deps.Pipeline), but
-// the nil-handling keeps the handler safe if the wiring is ever loosened.
+// the fail-closed check is tested so a future wiring change is discovered by
+// a test, not by missing rows.
 type indexSlotClaimer interface {
 	ClaimIndexSlot(repoKey string) (release func(), won bool)
 }
@@ -81,7 +93,9 @@ type indexSlotClaimer interface {
 // its rows deleted underneath it. Keys whose slot is already held by an
 // indexer are excluded and reported in the output (a silent skip is the mirror
 // of the bug). Dry run does NOT claim — see handleOrphanSweep's DRY-RUN
-// DECISION comment.
+// DECISION comment. If deps.Pipeline is nil the destructive path is REFUSED
+// (fail-closed): the handler deletes nothing and returns an error naming the
+// missing guard — see handleOrphanSweep's NIL-CLAIMER REFUSAL comment.
 func registerOrphanSweep(server *mcp.Server, deps SemanticDeps) {
 	if deps.Store == nil {
 		slog.Info("orphan_sweep: DATABASE_URL not set — tool disabled")
@@ -131,13 +145,21 @@ func registerOrphanSweep(server *mcp.Server, deps SemanticDeps) {
 // still closed.
 //
 // Real-delete flow (claim-then-delete, #741):
-//  1. Preview the candidate repoKeys (all orphans, no guard).
-//  2. For each candidate: claim its index slot. won → eligible; lost →
+//  1. NIL-CLAIMER REFUSAL: if claimer is nil, refuse immediately — delete
+//     nothing, return an error naming the missing guard, log at slog.Error.
+//     A guard whose only job is to prevent silent data_loss must fail closed
+//     when it is absent, not fail open and proceed without it. The shipped
+//     wiring always passes deps.Pipeline so this branch is unreachable in
+//     production; the test TestHandleOrphanSweep_NilClaimerRefusesDelete
+//     covers it so a future wiring change is discovered by a test, not by
+//     missing rows.
+//  2. Preview the candidate repoKeys (all orphans, no guard).
+//  3. For each candidate: claim its index slot. won → eligible; lost →
 //     excluded (recorded). Release is deferred per-key so a delete error or a
 //     panic cannot leak a claim (a leaked claim blocks that repoKey from ever
 //     indexing again for the process lifetime — requirement 3).
-//  3. For each eligible key: count its orphan rows, delete them, accumulate.
-//  4. Report deleted rows, eligible keys, and excluded keys (names + count).
+//  4. For each eligible key: count its orphan rows, delete them, accumulate.
+//  5. Report deleted rows, eligible keys, and excluded keys (names + count).
 //
 // Exclusion reporting (#741 requirement 2): excluded keys appear in the
 // response text AND in the excluded_in_flight counter. A skip nobody can see
@@ -171,6 +193,22 @@ func handleOrphanSweep(ctx context.Context, in OrphanSweepInput, store orphanSwe
 
 	// Real delete path (dry_run=false).
 
+	// NIL-CLAIMER REFUSAL (fail-closed): if the in-flight guard is not wired,
+	// refuse to delete anything. The guard's only job is to prevent silent
+	// data_loss; losing it must stop the destruction, not proceed without it.
+	// The shipped wiring always passes deps.Pipeline so this is unreachable in
+	// production — the check exists so a future wiring change is discovered by
+	// a test (TestHandleOrphanSweep_NilClaimerRefusesDelete), not by missing
+	// rows. The refusal is a Go error (the handler's existing failure
+	// convention — every other failure returns nil, fmt.Errorf(...)), which
+	// the MCP framework surfaces as IsError=true; logged at slog.Error so an
+	// operator actually sees it. A refusal nobody can observe is the same
+	// class of defect as the delete nobody can observe.
+	if claimer == nil {
+		slog.Error("orphan_sweep: in-flight guard not wired (nil claimer) — refusing destructive dry_run=false to prevent silent data_loss")
+		return nil, fmt.Errorf("orphan_sweep: in-flight guard not wired (nil claimer) — refusing destructive dry_run=false to prevent silent data_loss; wire deps.Pipeline or run with dry_run=true for a preview")
+	}
+
 	// Snapshot the orphan count before the delete so the result is informative.
 	before, countErr := store.CountOrphanRepoKeys(ctx)
 	if countErr != nil {
@@ -192,7 +230,7 @@ func handleOrphanSweep(ctx context.Context, in OrphanSweepInput, store orphanSwe
 	var firstErr error
 
 	for _, repoKey := range candidates {
-		release, won := claimOrSkip(claimer, repoKey)
+		release, won := claimer.ClaimIndexSlot(repoKey)
 		if !won {
 			excluded = append(excluded, repoKey)
 			slog.Info("orphan_sweep: excluded in-flight repoKey",
@@ -258,18 +296,6 @@ func handleOrphanSweep(ctx context.Context, in OrphanSweepInput, store orphanSwe
 		"orphan_sweep DELETED: orphan_repo_keys_before=%d eligible_keys=%d excluded_in_flight=%d rows_deleted=%d orphan_repo_keys_after=%d%s",
 		before, len(eligible), len(excluded), deletedTotal, after, formatExcluded(excluded),
 	)), nil
-}
-
-// claimOrSkip claims repoKey's index slot via the claimer. When claimer is nil
-// (no Pipeline wired — not the shipped configuration) the guard is disabled
-// and the key is treated as eligible with a no-op release. This keeps the
-// handler safe if the wiring is ever loosened, but registerOrphanSweep always
-// passes deps.Pipeline so the guard is active in production.
-func claimOrSkip(claimer indexSlotClaimer, repoKey string) (release func(), won bool) {
-	if claimer == nil {
-		return func() {}, true
-	}
-	return claimer.ClaimIndexSlot(repoKey)
 }
 
 // formatExcluded renders the excluded key list for the response so a skip is
