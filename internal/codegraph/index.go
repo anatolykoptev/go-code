@@ -365,9 +365,9 @@ func typedEnrichEnabled() bool {
 // unchanged on any failure (no go.mod, cold GOCACHE, load timeout, load
 // error) — this wrapper adds no additional timeout, only the gate and the
 // landed/degraded counter. IMPLEMENTS (ExtractGoImplements) and CALLS (here)
-// resolve against the SAME root within goanalysis.CachedLoadPackages' TTL
-// window, so whichever runs first pays the go/packages load for the other
-// (satisfaction.go:15-28).
+// share the SAME *LoadResult: EnrichWithTypedResolution loads once and hands
+// it to both passes through the seam, so the go/packages load is paid once
+// per request and the arena is released when the request ends (issue #747).
 //
 // Stamps cg.Tier/cg.Backend before enriching, matching BuildFromRepo's own
 // setup (repo.go:97-99) — the in-memory CallGraph struct's existing fields,
