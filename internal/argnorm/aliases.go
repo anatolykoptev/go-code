@@ -5,9 +5,13 @@ import "sort"
 // toolNameAliases rewrites unambiguous tool-name aliases to their real
 // registered name before dispatch. The agent-observed demand signal
 // (issue #570): "github_repo_search" was called repeatedly but the real tool
-// is "github_code_search".
+// is "github_code_search". "find_bugs" is a genuine synonym —
+// dataflow_analyze takes repo and returns dead stores, unused vars, dead
+// functions, and taint-tracked injection findings, which is exactly what the
+// name promises.
 var toolNameAliases = map[string]string{
 	"github_repo_search": "github_code_search",
+	"find_bugs":          "dataflow_analyze",
 }
 
 // ResolveToolName returns the canonical tool name for a (possibly aliased)
@@ -20,13 +24,26 @@ func ResolveToolName(name string) (canonical string, aliased bool) {
 }
 
 // didYouMeanHints maps known demand-signal tool names that have NO real
-// implementation to the nearest real capability. These are surfaced in the
-// unknown-tool error so agents pivot to the right tool instead of retrying
-// or treating the failure as a server connection drop (issue #570).
+// implementation to a short reason explaining what is missing. The reason is
+// surfaced in the unknown-tool error so agents don't retry or pivot to a
+// wrong tool (issue #570). A name here MUST NOT also be in toolNameAliases —
+// the alias would silently win and the hint would be unreachable dead config
+// (see TestAliasesAndHintsDisjoint).
+//
+// These are NOT redirects: a bare tool name would give a plausible-looking
+// answer to a question nobody asked (e.g. code_health returns a grade A–F
+// for a repo, which says nothing about flakiness). Both flaky_tests and
+// test_reliability need test-run history across CI runs, and this server
+// indexes code, not runs.
 var didYouMeanHints = map[string]string{
-	"find_bugs":        "debug_investigate",
-	"flaky_tests":      "debug_investigate",
-	"test_reliability": "code_health",
+	"flaky_tests":      "not implemented: detecting flaky tests needs test-run history across CI runs, which this server does not index (it analyses code, not runs)",
+	"test_reliability": "not implemented: test reliability needs test-run history across CI runs, which this server does not index (it analyses code, not runs)",
+}
+
+// DidYouMeanHint returns the registered reason for a known demand-signal
+// tool name that has no implementation, or "" when none is registered.
+func DidYouMeanHint(name string) string {
+	return didYouMeanHints[name]
 }
 
 // aliasTargetsFor returns the per-tool alias renames that apply to a tool with
@@ -73,10 +90,10 @@ func StrippedHint(toolName, param string) string {
 }
 
 // DidYouMean returns up to maxSuggest closest registered tool names to the
-// requested unknown name, plus any explicit hint for a known demand-signal
-// name (find_bugs→debug_investigate, …). The hint, when present, is forced to
-// the front of the result. Order is by ascending edit distance, ties broken
-// by a prefix bonus then alphabetical.
+// requested unknown name. Order is by ascending edit distance, ties broken
+// by a prefix bonus then alphabetical. A demand-signal name with a reason
+// (didYouMeanHints) is handled separately by didYouMeanResult — this function
+// only ranks real candidates.
 func DidYouMean(name string, candidates []string, maxSuggest int) []string {
 	if maxSuggest <= 0 {
 		return nil
@@ -107,17 +124,8 @@ func DidYouMean(name string, candidates []string, maxSuggest int) []string {
 		return ranked[i].name < ranked[j].name
 	})
 
-	// Force an explicit hint to the front when present.
-	var hints []string
-	if h, ok := didYouMeanHints[name]; ok {
-		hints = append(hints, h)
-	}
-
-	out := append([]string{}, hints...)
+	out := []string{}
 	seen := map[string]bool{}
-	for _, h := range hints {
-		seen[h] = true
-	}
 	for _, r := range ranked {
 		if seen[r.name] {
 			continue

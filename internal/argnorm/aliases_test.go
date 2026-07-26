@@ -32,28 +32,51 @@ func TestDidYouMean_GithubRepoSearch(t *testing.T) {
 	}
 }
 
-func TestDidYouMean_FindBugsHint(t *testing.T) {
-	// find_bugs has an explicit hint → debug_investigate forced to front.
-	candidates := []string{"debug_investigate", "code_health", "dead_code"}
-	got := DidYouMean("find_bugs", candidates, maxDidYouMean)
-	if len(got) == 0 || got[0] != "debug_investigate" {
-		t.Errorf("find_bugs should hint debug_investigate first, got %v", got)
+func TestResolveToolName_FindBugsAlias(t *testing.T) {
+	// find_bugs is a real alias for dataflow_analyze (takes repo, returns
+	// dead stores / unused vars / taint findings) — not a did-you-mean hint.
+	canon, aliased := ResolveToolName("find_bugs")
+	if !aliased || canon != "dataflow_analyze" {
+		t.Errorf(`find_bugs → dataflow_analyze, got %q (aliased=%v)`, canon, aliased)
 	}
 }
 
-func TestDidYouMean_FlakyTestsHint(t *testing.T) {
-	candidates := []string{"debug_investigate", "code_health", "dead_code"}
-	got := DidYouMean("flaky_tests", candidates, maxDidYouMean)
-	if len(got) == 0 || got[0] != "debug_investigate" {
-		t.Errorf("flaky_tests should hint debug_investigate first, got %v", got)
+func TestDidYouMeanResult_FlakyTestsReason(t *testing.T) {
+	// flaky_tests has no implementation and no honest pivot: the error must
+	// state the missing-data reason, not redirect to a wrong tool. Assert on
+	// a substring unique to the new wording (not a tool name).
+	reg := NewRegistry()
+	reg.Register("code_health", []string{"repo"})
+	r := didYouMeanResult("flaky_tests", reg.Names())
+	if !r.IsError {
+		t.Fatal("did-you-mean result must be an error")
+	}
+	txt := r.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(txt, "test-run history") {
+		t.Errorf("flaky_tests error must state the missing-data reason, got %q", txt)
 	}
 }
 
-func TestDidYouMean_TestReliabilityHint(t *testing.T) {
-	candidates := []string{"debug_investigate", "code_health", "dead_code"}
-	got := DidYouMean("test_reliability", candidates, maxDidYouMean)
-	if len(got) == 0 || got[0] != "code_health" {
-		t.Errorf("test_reliability should hint code_health first, got %v", got)
+func TestDidYouMeanResult_TestReliabilityReason(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register("code_health", []string{"repo"})
+	r := didYouMeanResult("test_reliability", reg.Names())
+	if !r.IsError {
+		t.Fatal("did-you-mean result must be an error")
+	}
+	txt := r.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(txt, "test-run history") {
+		t.Errorf("test_reliability error must state the missing-data reason, got %q", txt)
+	}
+}
+
+func TestAliasesAndHintsDisjoint(t *testing.T) {
+	// A name that is both an alias and a did-you-mean hint is a
+	// contradiction: the alias silently wins and the hint is unreachable.
+	for k := range toolNameAliases {
+		if _, ok := didYouMeanHints[k]; ok {
+			t.Errorf("name %q is both an alias and a did-you-mean hint — alias shadows the hint", k)
+		}
 	}
 }
 

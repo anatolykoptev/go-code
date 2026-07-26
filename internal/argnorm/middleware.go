@@ -96,19 +96,27 @@ func Middleware(reg *Registry) mcp.Middleware {
 	}
 }
 
-// didYouMeanResult builds the short unknown-tool error result with closest
-// matches. Format (issue #570):
+// didYouMeanResult builds the short unknown-tool error result. When a
+// demand-signal name has a registered reason (didYouMeanHints), the reason
+// is shown instead of suggestions — there is no honest pivot, and a bare
+// tool name would give a plausible-looking answer to a question nobody
+// asked. Otherwise closest matches are suggested (issue #570):
 //
 //	unknown tool "github_repo_search" — did you mean "github_code_search"?
+//	unknown tool "flaky_tests" — not implemented: detecting flaky tests needs …
 func didYouMeanResult(name string, candidates []string) *mcp.CallToolResult {
-	suggestions := DidYouMean(name, candidates, maxDidYouMean)
 	msg := fmt.Sprintf("unknown tool %q", name)
-	if len(suggestions) > 0 {
-		quoted := make([]string, len(suggestions))
-		for i, s := range suggestions {
-			quoted[i] = `"` + s + `"`
+	if reason := DidYouMeanHint(name); reason != "" {
+		msg += " — " + reason
+	} else {
+		suggestions := DidYouMean(name, candidates, maxDidYouMean)
+		if len(suggestions) > 0 {
+			quoted := make([]string, len(suggestions))
+			for i, s := range suggestions {
+				quoted[i] = `"` + s + `"`
+			}
+			msg += " — did you mean " + joinOr(quoted) + "?"
 		}
-		msg += " — did you mean " + joinOr(quoted) + "?"
 	}
 	return &mcp.CallToolResult{
 		IsError: true,
