@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.61.0](https://github.com/anatolykoptev/vaelor/compare/v1.60.0...v1.61.0) (2026-07-26)
+
+
+### Added
+
+* **argnorm:** make find_bugs a real alias, honest hints for the rest ([#744](https://github.com/anatolykoptev/vaelor/issues/744)) ([3a672e7](https://github.com/anatolykoptev/vaelor/commit/3a672e76add878024d6e4533e8569e1540bbc013))
+
 ## [1.60.0](https://github.com/anatolykoptev/vaelor/compare/v1.59.13...v1.60.0) (2026-07-25)
 
 
