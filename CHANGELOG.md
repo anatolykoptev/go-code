@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.62.1](https://github.com/anatolykoptev/vaelor/compare/v1.62.0...v1.62.1) (2026-07-26)
+
+
+### Fixed
+
+* pass *LoadResult through the enrich seam, remove packagesLoadCache ([#747](https://github.com/anatolykoptev/vaelor/issues/747)) ([#759](https://github.com/anatolykoptev/vaelor/issues/759)) ([527fb73](https://github.com/anatolykoptev/vaelor/commit/527fb73483d87ebd0714cb1ebc6a9722d0c73447))
+
 ## [1.62.0](https://github.com/anatolykoptev/vaelor/compare/v1.61.2...v1.62.0) (2026-07-26)
 
 
