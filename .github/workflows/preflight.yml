@@ -134,6 +134,24 @@ jobs:
           PR_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ steps.pg.outputs.port }}/gocode_test?sslmode=disable
         run: make preflight
 
+      # Narrow race-detector step (issue #743). Runs -race ONLY on the two
+      # packages that carry concurrency (internal/callgraph background warm
+      # goroutine + LRU; internal/embeddings indexing single-flight) — NOT
+      # ./..., which would blow the 20-minute job timeout under -race's
+      # 2-10× CPU / 5-10× memory cost (a timing-out gate is its own
+      # synthetic green). Placed AFTER make preflight so a plain failure is
+      # reported before a race failure, and as an additional step in the
+      # SAME job because internal/embeddings' single-flight tests need the
+      # ephemeral postgres+age service already started above — a separate
+      # job would duplicate that whole setup. Blocking (no
+      # continue-on-error): a gate that cannot fail is the defect being
+      # fixed here. See Makefile test-race for the falsification contract.
+      - name: make test-race
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ steps.pg.outputs.port }}/gocode_test?sslmode=disable
+          PR_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ steps.pg.outputs.port }}/gocode_test?sslmode=disable
+        run: make test-race
+
       - name: Stop ephemeral postgres+age
         if: always()
         run: docker rm -f "${{ steps.pg.outputs.container }}" >/dev/null 2>&1 || true

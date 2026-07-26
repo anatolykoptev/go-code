@@ -15,7 +15,7 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
 GIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 LDFLAGS  = -s -w -X main.version=$(VERSION) -X main.buildSHA=$(GIT_SHA)
 
-.PHONY: build lint fmt-check test test-short govulncheck preflight run deploy clean vendor
+.PHONY: build lint fmt-check test test-short test-race govulncheck preflight run deploy clean vendor
 
 build:
 	GOWORK=off CGO_ENABLED=1 go build -mod=vendor -ldflags="$(LDFLAGS)" -o $(BINARY) ./cmd/vaelor
@@ -41,6 +41,22 @@ test:
 # a cadence split, NOT skip-to-green. Cuts the gate from ~26m to ~2m.
 test-short:
 	GOWORK=off go test -mod=vendor -short -timeout 20m ./...
+
+# test-race — narrow race-detector target covering ONLY the packages that
+# actually carry concurrency: internal/callgraph (background warmGoTypesCache
+# goroutine mutating an LRU-cached *CallGraph that concurrent BuildFromRepo
+# cache hits read) and internal/embeddings (sync IndexRepo single-flight +
+# schema singleflight). NOT -race on ./... — the full suite carries a
+# 20-minute timeout and -race costs 2-10× CPU / 5-10× memory, so a blanket
+# -race would trade an invisible bug class for a timing-out gate, which is
+# its own synthetic green (issue #743). Runs -short so embeddings' heavy
+# non-concurrency integration tests skip while the single-flight tests
+# (which do NOT gate on testing.Short) still run. Falsifiable: reintroduce
+# an in-place mutation of a cache-shared pointer and
+# TestWarmGoTypesCache_ZeroEdgePath_NoRaceWithConcurrentReader goes red
+# with WARNING: DATA RACE.
+test-race:
+	GOWORK=off go test -mod=vendor -race -short -timeout 10m ./internal/callgraph/ ./internal/embeddings/
 
 # govulncheck — dependency + toolchain vulnerability scan (plan ADR 7,
 # plans/go-code/2026-06-30-frontend-parse-parity-react-svelte-astro.md Phase
