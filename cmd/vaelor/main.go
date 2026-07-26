@@ -14,6 +14,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -307,8 +308,7 @@ func runMCPServe(cfg Config) {
 // BearerAuth on scrape traffic; bound to all interfaces for container scrape.
 func startPrometheusScrape(ctx context.Context, logger *slog.Logger) {
 	promPort := env.Str("PROM_PORT", "9897")
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", kitmetrics.MetricsHandler())
+	mux := buildPromMux()
 	srv := &http.Server{
 		Addr:              ":" + promPort,
 		Handler:           mux,
@@ -326,6 +326,33 @@ func startPrometheusScrape(ctx context.Context, logger *slog.Logger) {
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
+}
+
+// buildPromMux constructs the metrics-listener mux (PROM_PORT, 9897). It owns
+// its own *http.ServeMux — NOT http.DefaultServeMux — so the pprof handlers
+// registered here live on the metrics listener only and never leak onto the
+// MCP listener (8897), which uses a separate mux inside mcpserver.Run.
+//
+// pprof is registered unconditionally (issue #754): a flag that must be set
+// before a profile can be taken is a flag nobody sets during the incident, and
+// the incident is the only time it matters. Both ports are loopback-only
+// (docker port mapping), so this adds no external surface beyond /metrics.
+// Handlers are wired explicitly rather than via `_ "net/http/pprof"` (whose
+// init registers on DefaultServeMux) to keep the debug surface on this mux
+// alone. allocs is registered alongside heap because a retention bug and a
+// churn bug are indistinguishable in inuse_space alone.
+func buildPromMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", kitmetrics.MetricsHandler())
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	return mux
 }
 
 func runIndexDesigns(cfg Config, dir string) {
