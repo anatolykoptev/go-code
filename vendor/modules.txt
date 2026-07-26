@@ -1,7 +1,7 @@
 # github.com/LarsArtmann/gogenfilter/v3 v3.0.3-0.20260527072437-63f00cf54986
 ## explicit; go 1.26.3
 github.com/LarsArtmann/gogenfilter/v3
-# github.com/anatolykoptev/go-kit v0.97.3
+# github.com/anatolykoptev/go-kit v0.97.7
 ## explicit; go 1.26.3
 github.com/anatolykoptev/go-kit/cache
 github.com/anatolykoptev/go-kit/cli

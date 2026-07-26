@@ -98,6 +98,17 @@ func registerCacheMetrics(c *Cache, mc *MetricsConfig) {
 		ConstLabels: labels,
 	}, func() float64 { return float64(c.evictions.Load()) })
 
+	l2Available := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "gokit_cache_l2_available",
+		Help:        "1 if the L2 (Redis) tier is configured and active, 0 if L1-only (incl. silent Redis-connect downgrade).",
+		ConstLabels: labels,
+	}, func() float64 {
+		if c.L2Available() {
+			return 1
+		}
+		return 0
+	})
+
 	size := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name:        "gokit_cache_size",
 		Help:        "Current number of entries in L1.",
@@ -109,7 +120,7 @@ func registerCacheMetrics(c *Cache, mc *MetricsConfig) {
 		return float64(n)
 	})
 
-	mc.reg.MustRegister(hitsL1, hitsL2, missesL1, missesL2, evictions, size)
+	mc.reg.MustRegister(hitsL1, hitsL2, missesL1, missesL2, evictions, l2Available, size)
 }
 
 // mergeLabels returns a new Labels with the union of a and b. b wins on conflict.

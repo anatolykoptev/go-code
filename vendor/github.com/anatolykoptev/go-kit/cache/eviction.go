@@ -122,36 +122,26 @@ func (c *Cache) evictByWeight(batch *[]evictedEntry) {
 	}
 }
 
-// cleanupLoop periodically removes expired entries from L1.
-func (c *Cache) cleanupLoop(interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.done:
-			return
-		case <-ticker.C:
-			var batch []evictedEntry
-			c.mu.Lock()
-			now := time.Now()
-			for key, e := range c.items {
-				if now.After(e.expiresAt) {
-					if c.cfg.OnEvict != nil {
-						batch = append(batch, evictedEntry{key: key, data: e.data, reason: EvictExpired})
-					}
-					if e.inMain {
-						c.main.Remove(e.elem)
-					} else {
-						c.small.Remove(e.elem)
-					}
-					c.totalWeight -= e.weight
-					c.removeFromTagIndex(key, e.tags)
-					delete(c.items, key)
-				}
+// cleanupTick removes expired entries from L1 in a single pass.
+func (c *Cache) cleanupTick() {
+	var batch []evictedEntry
+	c.mu.Lock()
+	now := time.Now()
+	for key, e := range c.items {
+		if now.After(e.expiresAt) {
+			if c.cfg.OnEvict != nil {
+				batch = append(batch, evictedEntry{key: key, data: e.data, reason: EvictExpired})
 			}
-			c.mu.Unlock()
-			c.notifyBatch(batch)
+			if e.inMain {
+				c.main.Remove(e.elem)
+			} else {
+				c.small.Remove(e.elem)
+			}
+			c.totalWeight -= e.weight
+			c.removeFromTagIndex(key, e.tags)
+			delete(c.items, key)
 		}
 	}
+	c.mu.Unlock()
+	c.notifyBatch(batch)
 }
