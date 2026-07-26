@@ -346,6 +346,31 @@ func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 			cached = MergeCallGraphs(cached, typedCG)
 			cached.Tier = "enhanced"
 			cached.Backend = BackendGoTypes
+		} else {
+			// MergeCallGraphs returns a fresh *CallGraph, so the typedCG
+			// != nil branch cannot alias the LRU entry. The zero-edge
+			// branch (typedCG == nil) does NOT — `cached` still points at
+			// the LRU entry's own *CallGraph, which is shared with any
+			// concurrent BuildFromRepo cache hit (repo.go:76) reading it
+			// while this background goroutine (repo.go:109) runs. Mutating
+			// it in place races on Warming and the TypeRels slice header
+			// + backing array (round-5 defect, introduced by c2a7cf11).
+			//
+			// Build a shallow struct copy and give it a fresh TypeRels
+			// backing array before appending. A shallow copy alone is NOT
+			// enough: it shares the TypeRels slice header and its backing
+			// array, so append on the copy writes into the shared array
+			// whenever capacity allows. Allocating a new slice and
+			// copying the elements severs both the header alias and the
+			// backing-array alias. The other slice/map fields (Edges,
+			// Symbols, HookCallbacks, UsesIndex) are carried over
+			// read-only — this branch never writes them, and concurrent
+			// reads of a shared slice/map are safe in Go, so they need no
+			// copy here. Tier and Backend are scalars left unchanged on
+			// this branch.
+			cp := *cached
+			cp.TypeRels = append([]parser.TypeRelationship(nil), cached.TypeRels...)
+			cached = &cp
 		}
 		cached.Warming = false
 		if !hasImplementsEdge(cached) {

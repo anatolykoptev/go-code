@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -826,4 +827,103 @@ func TestWarmGoTypesCache_ColdFailThenFailedWarm_PreservesCacheAndRecordsFailed(
 			t.Errorf("expected NO IMPLEMENTS edges after a failed warm (ExtractGoImplements must not run on the failure path); found %+v", rel)
 		}
 	}
+}
+
+// TestWarmGoTypesCache_ZeroEdgePath_NoRaceWithConcurrentReader pins the
+// round-5 fix: warmGoTypesCache's zero-edge branch (typedCG == nil, err == nil)
+// must NOT mutate the *CallGraph pointer returned by cgCache.get in place.
+// That pointer is shared with any concurrent BuildFromRepo cache hit
+// (repo.go:76) reading the same object, and warmGoTypesCache runs in a
+// background goroutine (repo.go:109) — in-place writes to Warming and
+// TypeRels are a data race.
+//
+// The test seeds the cache, grabs the shared pointer the way a cache hit
+// would, runs a reader goroutine that continuously reads Warming and ranges
+// TypeRels on that shared pointer, and concurrently runs the real zero-edge
+// warm path (which, under the bug, writes through the shared pointer). Under
+// -race the bug reddens with WARNING: DATA RACE on Warming and/or TypeRels;
+// after the fix the warm path writes to a fresh *CallGraph and the test is
+// green. Without -race the test passes either way (the race is invisible to
+// the repo's non-race gate — Makefile:28 — which is the point of filing the
+// gap separately).
+func TestWarmGoTypesCache_ZeroEdgePath_NoRaceWithConcurrentReader(t *testing.T) {
+	dir := t.TempDir()
+
+	gomod := "module example.com/round5race\n\ngo 1.22\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Interface + satisfying type, no function calls → goanalysis.Resolve
+	// yields zero typed call edges → typedCG == nil, err == nil on the
+	// background retry, exercising the zero-edge branch exactly.
+	src := `package main
+
+type Greeter interface {
+	Greet() string
+}
+
+type Hello struct{}
+
+func (h Hello) Greet() string { return "hello" }
+
+func main() {}`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+	InvalidateBuildCache()
+
+	key := cgCacheKey(TraceRepoInput{Root: dir})
+
+	// Seed state 1 (cold sync load failed): Warming=true, no IMPLEMENTS.
+	// Pre-allocate TypeRels with capacity so the in-place append under the
+	// bug writes into the shared backing array (the race is on both the
+	// slice header AND the backing array); without capacity append would
+	// allocate a fresh array and shrink the race window to the header only.
+	seeded := &CallGraph{
+		Symbols:  []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:     "basic",
+		Backend:  BackendTreeSitter,
+		Warming:  true,
+		TypeRels: make([]parser.TypeRelationship, 0, 8),
+	}
+	cgCache.set(key, seeded, dir)
+
+	// Grab the shared pointer the way a concurrent BuildFromRepo cache hit
+	// would (repo.go:76). This is the exact pointer warmGoTypesCache will
+	// get from the cache and, under the bug, mutate in place.
+	sharedCg, ok := cgCache.get(key, dir)
+	if !ok {
+		t.Fatal("expected seeded cache hit")
+	}
+
+	// Reader goroutine: continuously read Warming and range TypeRels on the
+	// shared pointer for the entire duration of the warm. No sleep — the
+	// loop runs until the writer signals completion, guaranteeing genuine
+	// overlap with the writer's mutation.
+	writerDone := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-writerDone:
+				return
+			default:
+				_ = sharedCg.Warming
+				for range sharedCg.TypeRels {
+				}
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	// Writer: the real zero-edge warm path. Under the bug it writes
+	// sharedCg.Warming = false and appends to sharedCg.TypeRels in place
+	// while the reader reads them → DATA RACE. After the fix it builds a
+	// fresh *CallGraph and writes there → no race.
+	warmGoTypesCache(dir, seeded.Symbols, key)
+	close(writerDone)
+	<-readerDone
 }
