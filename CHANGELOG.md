@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.61.2](https://github.com/anatolykoptev/vaelor/compare/v1.61.1...v1.61.2) (2026-07-26)
+
+
+### Fixed
+
+* **orphan_sweep:** guard against deleting a first index in flight ([#755](https://github.com/anatolykoptev/vaelor/issues/755)) ([799f515](https://github.com/anatolykoptev/vaelor/commit/799f51501cae0fd19ced7c6dea3cdc955480c838))
+
 ## [1.61.1](https://github.com/anatolykoptev/vaelor/compare/v1.61.0...v1.61.1) (2026-07-26)
 
 
