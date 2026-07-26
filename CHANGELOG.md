@@ -2,6 +2,14 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.61.1](https://github.com/anatolykoptev/vaelor/compare/v1.61.0...v1.61.1) (2026-07-26)
+
+
+### Fixed
+
+* **build-info:** bake dozor-injected git SHA into gocode_build_info ([#749](https://github.com/anatolykoptev/vaelor/issues/749)) ([b7f37c5](https://github.com/anatolykoptev/vaelor/commit/b7f37c5997ebd7cf633e513adc63bf92b9a6a465))
+* **callgraph:** answer with the tree-sitter tier instead of waiting out the deadline on a cold Go repo ([#737](https://github.com/anatolykoptev/vaelor/issues/737)) ([d78a294](https://github.com/anatolykoptev/vaelor/commit/d78a2942f62b230fb174413a4d7eaef7eaedbad8))
+
 ## [1.61.0](https://github.com/anatolykoptev/vaelor/compare/v1.60.0...v1.61.0) (2026-07-26)
 
 
