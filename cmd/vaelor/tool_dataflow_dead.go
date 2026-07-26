@@ -15,6 +15,7 @@ type xmlDfDeadFuncs struct {
 	Total   int                `xml:"total,attr"`
 	Dead    int                `xml:"dead,attr"`
 	Ratio   float64            `xml:"ratio,attr"`
+	Warming string             `xml:"warming,attr,omitempty"`
 	Symbols []xmlDfDeadFuncSym `xml:"symbol"`
 }
 
@@ -33,12 +34,16 @@ type deadFuncsResult struct {
 	durationMS int64
 }
 
+// dataflowDeadBuildFromRepo is the production seam for callgraph.BuildFromRepo;
+// handler-level tests can override it to avoid heavy parsing.
+var dataflowDeadBuildFromRepo = callgraph.BuildFromRepo
+
 // runDeadFunctionAnalysis runs callgraph-based dead code detection.
 // Returns nil (not error) if callgraph building fails — non-fatal for dataflow.
 func runDeadFunctionAnalysis(ctx context.Context, root, language string, deps analyze.Deps) *deadFuncsResult {
 	start := time.Now()
 
-	cg, err := callgraph.BuildFromRepo(ctx, callgraph.TraceRepoInput{
+	cg, err := dataflowDeadBuildFromRepo(ctx, callgraph.TraceRepoInput{
 		Root:     root,
 		Language: language,
 	})
@@ -75,6 +80,7 @@ func runDeadFunctionAnalysis(ctx context.Context, root, language string, deps an
 			Total:   result.TotalFunctions,
 			Dead:    result.DeadCount,
 			Ratio:   result.DeadRatio,
+			Warming: warmingAttr(cg.Warming),
 			Symbols: symbols,
 		},
 		durationMS: time.Since(start).Milliseconds(),

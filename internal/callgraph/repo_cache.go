@@ -63,44 +63,63 @@ func SetL2(redisURL string) {
 	cgCache.l2 = l2
 }
 
-func (c *callGraphCache) get(key, root string) (*CallGraph, bool) {
+// getWithAt is the primary cache lookup: it returns the cached *CallGraph
+// and the entry's at timestamp (when it was cached). The timestamp lets
+// BuildFromRepo's cache-hit path decide whether a Warming=true entry is
+// stale (cached before the root's warm completed) or fresh (cached after a
+// failed rebuild) — the round-8 loop guard, repo.go:76.
+//
+// The existing contract stands: c.mu is released before returning, so
+// callers may read the graph but must never write it (round-5 defect,
+// repo_cache.go:66-72). at is a time.Time value, not a pointer — callers
+// cannot mutate the LRU entry through it.
+func (c *callGraphCache) getWithAt(key, root string) (*CallGraph, time.Time, bool) {
 	c.mu.Lock()
 	e, ok := c.lru.Get(key)
 	if ok {
 		if time.Since(e.at) <= cgCacheTTL {
+			at := e.at
 			c.mu.Unlock()
-			return e.cg, true
+			return e.cg, at, true
 		}
 		c.lru.Delete(key)
 	}
 	c.mu.Unlock()
 
 	if c.l2 == nil {
-		return nil, false
+		return nil, time.Time{}, false
 	}
 
 	data, err := c.l2.Get(context.Background(), key)
 	if err != nil {
-		return nil, false
+		return nil, time.Time{}, false
 	}
 
 	entry, err := decodeCGEntry(data)
 	if err != nil {
-		return nil, false
+		return nil, time.Time{}, false
 	}
 
 	// Validate content hash before trusting a cross-process L2 entry.
 	if ingest.RepoContentHash(root) != entry.ContentHash {
 		// Stale L2 entry; delete it to avoid serving it again.
 		_ = c.l2.Del(context.Background(), key)
-		return nil, false
+		return nil, time.Time{}, false
 	}
 
 	c.mu.Lock()
 	c.lru.Set(key, cgCacheEntry{cg: entry.CG, at: entry.At})
 	cg := entry.CG
+	at := entry.At
 	c.mu.Unlock()
-	return cg, true
+	return cg, at, true
+}
+
+// get is the legacy wrapper for callers that do not need the entry's
+// timestamp (warmGoTypesCache, tests). Delegates to getWithAt.
+func (c *callGraphCache) get(key, root string) (*CallGraph, bool) {
+	cg, _, ok := c.getWithAt(key, root)
+	return cg, ok
 }
 
 func (c *callGraphCache) set(key string, cg *CallGraph, root string) {

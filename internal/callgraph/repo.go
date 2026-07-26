@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"os/exec"
 	"sync"
 	"time"
 
@@ -74,9 +73,59 @@ func BuildFromRepo(ctx context.Context, input TraceRepoInput) (*CallGraph, error
 	// Check cache first — parsing all repo files is expensive (15-60s on cold start).
 	cacheKey := cgCacheKey(input)
 	if !input.Refresh {
-		if cached, ok := cgCache.get(cacheKey, input.Root); ok {
-			slog.Debug("callgraph: BuildFromRepo cache hit", slog.String("root", input.Root))
-			return cached, nil
+		if cached, entryAt, ok := cgCache.getWithAt(cacheKey, input.Root); ok {
+			// Sibling-stale Warming detection (round-7, issue #735; round-8
+			// loop guard). The background warm's single-flight guard is
+			// root-keyed (goTypesWarmingSet, repo.go:288), so on a cold repo
+			// only ONE warm runs and only the warm's OWN key gets its
+			// Warming flag cleared in place (repo.go:344-379). Sibling keys
+			// — same root, different Focus/Language/IncludeFieldAccess
+			// scope — keep Warming=true for the full cgCacheTTL because
+			// their warm was suppressed as `skipped` and their entry was
+			// never touched. A cache hit on such a sibling returns a stale
+			// Warming=true graph whose "retry for the enhanced tier" note
+			// can never resolve.
+			//
+			// If the root has been warmed (goTypesWarmedSet stores the
+			// completion instant) but this cached entry still advertises
+			// Warming AND was cached before the warm completed
+			// (entryAt predates warmedAt), treat it as a MISS and fall
+			// through to the normal rebuild. The rebuild runs against a
+			// now-warm GOCACHE so it is fast and returns at the enhanced
+			// tier honestly, with IMPLEMENTS present. Clearing the flag
+			// alone would leave a basic-tier answer that merely stops
+			// advertising it could be better — a silent downgrade.
+			//
+			// Round-8 loop guard: an entry re-cached AFTER the warm (e.g.
+			// a rebuild whose typed resolution failed again) carries a
+			// fresh entryAt that is NOT before warmedAt, so the divert
+			// does NOT fire — the cache hit is returned as-is. Without
+			// this timestamp check, round 7's divert looped forever on
+			// scopes whose typed resolution keeps failing (every request
+			// rebuilt, 15-60s each, for the process lifetime). Do NOT
+			// mutate the cached entry: cgCache.getWithAt releases c.mu
+			// before returning and the *CallGraph is shared with
+			// concurrent readers (round-5 defect, repo_cache.go:66-72).
+			if cached.Warming {
+				if warmedAtVal, warmed := goTypesWarmedSet.Load(input.Root); warmed {
+					warmedAt, _ := warmedAtVal.(time.Time)
+					if warmedAt.After(entryAt) {
+						slog.Info("callgraph: cache hit with stale Warming flag after successful background warm; rebuilding",
+							slog.String("root", input.Root))
+						// Fall through to rebuild below.
+					} else {
+						slog.Debug("callgraph: BuildFromRepo cache hit (warming note is fresh, not stale)",
+							slog.String("root", input.Root))
+						return cached, nil
+					}
+				} else {
+					slog.Debug("callgraph: BuildFromRepo cache hit", slog.String("root", input.Root))
+					return cached, nil
+				}
+			} else {
+				slog.Debug("callgraph: BuildFromRepo cache hit", slog.String("root", input.Root))
+				return cached, nil
+			}
 		}
 	}
 
@@ -126,6 +175,7 @@ func TraceRepo(ctx context.Context, input TraceRepoInput) (*TraceResult, error) 
 
 	result := Trace(ctx, g, input.Symbol, input.Opts)
 	result.Tier = g.Tier
+	result.Warming = g.Warming
 
 	return &result, nil
 }
@@ -150,23 +200,37 @@ func EnrichWithTypedResolution(ctx context.Context, root string, base *CallGraph
 
 	if goanalysis.HasGoModule(root) {
 		warmCtx, warmCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		typedCG := tryGoTypesResolution(warmCtx, root, symbols)
+		typedCG, loadErr := tryGoTypesResolution(warmCtx, root, symbols)
 		warmCancel()
-		if typedCG != nil {
-			cg = MergeCallGraphs(cg, typedCG)
-			cg.Tier = "enhanced"
-			cg.Backend = BackendGoTypes
+		if loadErr != nil {
+			// Cold cache: the go/packages LOAD failed (tryGoTypesResolution
+			// returned (nil, err)). The background warm (warmGoTypesCache in
+			// BuildFromRepo) is running and will upgrade the cached entry; a
+			// retry will return the enhanced tier. Mark the graph so callers can
+			// surface a "type-aware enrichment is warming, retry for the
+			// enhanced tier" note. Do NOT call ExtractGoImplements here — it
+			// would block on the same slow packages.Load that already failed,
+			// burning the request's remaining deadline (issue #735).
+			cg.Warming = true
+		} else {
+			// Load succeeded (with or without typed call edges). In either case
+			// ExtractGoImplements is cheap: it shares the same CachedLoadPackages
+			// the load just warmed, so it cannot block on a cold NeedDeps load
+			// here. Running it unconditionally on the success path restores the
+			// pre-round-1 behaviour for the zero-edge case (a Go module with only
+			// type declarations and no function calls) — round 1's single
+			// nil-return silently dropped IMPLEMENTS on that case, regressing
+			// issue #467's whole feature.
+			if typedCG != nil {
+				cg = MergeCallGraphs(cg, typedCG)
+				cg.Tier = "enhanced"
+				cg.Backend = BackendGoTypes
+			}
+			// When typedCG is nil but loadErr is nil, the load succeeded with
+			// zero typed CALL edges — Tier stays "basic" for CALLS (honest), and
+			// IMPLEMENTS enrichment still runs below.
+			cg.TypeRels = append(cg.TypeRels, ExtractGoImplements(ctx, root)...)
 		}
-
-		// Go IMPLEMENTS enrichment: tree-sitter cannot see structural interface
-		// satisfaction (no `implements` keyword), so cg.TypeRels from parsing
-		// carries only embedding (INHERITS) edges for Go. Compute (type→interface)
-		// satisfaction via go/types and append it as RelImplements relationships.
-		// Both call_trace (via BuildFromRepo) and code_graph (via
-		// buildAGECallGraph) call this seam, so both get IMPLEMENTS edges now.
-		// Non-fatal and bounded: on go.mod-absent / load-failure / timeout this
-		// returns nil. See issue #467.
-		cg.TypeRels = append(cg.TypeRels, ExtractGoImplements(ctx, root)...)
 	}
 
 	// Attempt SCIP resolution for non-Go languages (or when go/types failed).
@@ -182,25 +246,41 @@ func EnrichWithTypedResolution(ctx context.Context, root string, base *CallGraph
 }
 
 // tryGoTypesResolution attempts to load Go packages and resolve typed call
-// edges. Returns nil on any failure — callers fall back to tree-sitter-only
-// graph. On failure, bumps gocode_callgraph_gotypes_fallback_total{reason}
-// so the degradation rate is visible without requiring operators to grep
-// logs. Routes through goanalysis.CachedLoadPackages so a load already
-// warmed by ExtractGoImplements (IMPLEMENTS, callgraph/satisfaction.go)
-// against the same root within the cache TTL is reused here instead of
-// re-run.
-func tryGoTypesResolution(ctx context.Context, root string, tsSymbols []*parser.Symbol) *CallGraph {
+// edges. The return distinguishes two nil-cg cases that round 1 conflated:
+//
+//   - (nil, err): the go/packages LOAD failed (cold GOCACHE, missing/unbuildable
+//     deps, timeout). Genuine cold path — callers must set Warming and skip
+//     ExtractGoImplements (which would block on the same slow load, issue #735).
+//     Bumps gocode_callgraph_gotypes_fallback_total{reason="deadline"|"load_error"}.
+//
+//   - (nil, nil): the load SUCCEEDED but goanalysis.Resolve produced zero typed
+//     call edges (e.g. a Go module with only type declarations and no function
+//     calls). Nothing is warming — the load already succeeded — so callers must
+//     NOT set Warming, and SHOULD still call ExtractGoImplements (it shares the
+//     same CachedLoadPackages and is cheap on a warm load; skipping it silently
+//     drops issue #467's IMPLEMENTS feature). Bumps
+//     gocode_callgraph_gotypes_fallback_total{reason="no_edges"} so this case
+//     is no longer invisible.
+//
+//   - (cg, nil): load succeeded with typed call edges; callers merge and mark
+//     the enhanced tier.
+//
+// Routes through goanalysis.CachedLoadPackages so a load already warmed by
+// ExtractGoImplements (IMPLEMENTS, callgraph/satisfaction.go) against the same
+// root within the cache TTL is reused here instead of re-run.
+func tryGoTypesResolution(ctx context.Context, root string, tsSymbols []*parser.Symbol) (*CallGraph, error) {
 	lr, err := goanalysis.CachedLoadPackages(ctx, root)
 	if err != nil {
 		recordGotypesFallback(err)
 		slog.Warn("go/packages load failed; falling back to tree-sitter", "err", err)
-		return nil
+		return nil, err
 	}
 	typedEdges := goanalysis.Resolve(lr.Packages)
 	if len(typedEdges) == 0 {
-		return nil
+		recordGotypesNoEdges()
+		return nil, nil
 	}
-	return ConvertToCallGraph(typedEdges, tsSymbols)
+	return ConvertToCallGraph(typedEdges, tsSymbols), nil
 }
 
 // buildUsesIndex resolves Astro template refs from all parse results and returns
@@ -224,6 +304,28 @@ func buildUsesIndex(results []parseResult, root string) map[string][]string {
 // goTypesWarmingSet tracks repos currently being warmed to avoid duplicate goroutines.
 var goTypesWarmingSet sync.Map
 
+// goTypesWarmedSet tracks repos whose background go/types warm has COMPLETED
+// successfully, storing the completion instant (time.Time). Keyed by root
+// (not by cacheKey) deliberately: the single-flight guard
+// (goTypesWarmingSet) is root-keyed too, so on a cold repo only ONE warm
+// runs and only ONE key — the warm's own — gets its Warming flag cleared in
+// place (repo.go:344-379). Sibling keys (same root, different
+// Focus/Language/IncludeFieldAccess scope) keep Warming=true for the full
+// cgCacheTTL because their warm was suppressed as `skipped` (repo.go:288)
+// and their entry was never touched. BuildFromRepo's cache-hit path checks
+// the stored timestamp: if a hit still advertises Warming but the entry's
+// at predates the warm completion, it treats the hit as a miss and rebuilds
+// (repo.go:76) — the rebuild runs against a now-warm GOCACHE and returns at
+// the enhanced tier honestly. An entry re-cached AFTER the warm (e.g. a
+// rebuild whose typed resolution failed again) carries a fresh at that is
+// NOT before the warm completion, so the divert terminates itself after one
+// rebuild — the round-8 loop guard.
+//
+// Growth: one entry per repo root for the process lifetime (~39 Go repos on
+// the box). Lost on restart — after a restart the pre-existing sibling-stale
+// behaviour returns for one TTL window. Both are acceptable; no eviction.
+var goTypesWarmedSet sync.Map
+
 // buildPrewarmEnv returns the environment for the go build pre-warm subprocess.
 // CGO_ENABLED=0 is required: tree-sitter grammars need C headers that are absent
 // outside the container build context. Without it the build fails instantly and
@@ -245,9 +347,19 @@ func buildPrewarmEnv() []string {
 
 // warmGoTypesCache runs go/types analysis in background to warm GOCACHE.
 // When complete, it upgrades the cached CallGraph from basic to enhanced tier.
+//
+// The pre-warm `go build` step was removed (issue #735 Part 2): it ran
+// `go build -mod=vendor ./...` with CGO_ENABLED=0, which fails on every cgo
+// repo (build constraints exclude all Go files for cgo-requiring packages).
+// The runtime image lacks gcc/musl-dev so CGO_ENABLED=1 is not viable either.
+// GOCACHE is now persistent (ops-side fix), so packages.Load in this
+// background warm handles warming without the pre-build. A failing warm is
+// counted by gocode_callgraph_background_warm_total{outcome="failed} so
+// operators can alert on repos that never reach the enhanced tier.
 func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 	_, alreadyWarming := goTypesWarmingSet.LoadOrStore(root, true)
 	if alreadyWarming {
+		recordBackgroundWarm("skipped")
 		return
 	}
 	defer goTypesWarmingSet.Delete(root)
@@ -257,18 +369,6 @@ func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	// Pre-warm GOCACHE with go build -- fills object cache without NeedTypesInfo overhead.
-	// After this, packages.Load completes in <10s instead of 3+ minutes.
-	slog.Info("go/types: pre-warming GOCACHE via go build", "root", root)
-	buildCmd := exec.CommandContext(ctx, "go", "build", "-mod=vendor", "./...")
-	buildCmd.Dir = root
-	buildCmd.Env = buildPrewarmEnv()
-	if berr := buildCmd.Run(); berr != nil {
-		slog.Warn("go/types: go build pre-warm failed (non-fatal)", "err", berr)
-		// Continue anyway -- packages.Load may still succeed from partial cache.
-	}
-	slog.Info("go/types: go build pre-warm done, starting packages.Load", "root", root)
-
 	// tryGoTypesResolution now routes through goanalysis.CachedLoadPackages.
 	// The synchronous 10s probe in EnrichWithTypedResolution that triggered
 	// this background warm almost certainly already ran (and failed) against
@@ -276,18 +376,105 @@ func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 	// patient, now-warm-GOCACHE retry isn't short-circuited by the stale
 	// cold-cache failure instead of actually re-running the load.
 	goanalysis.InvalidateCachedLoad(root)
-	typedCG := tryGoTypesResolution(ctx, root, symbols)
-	if typedCG == nil {
-		slog.Warn("go/types: background warm failed", "root", root)
+	typedCG, err := tryGoTypesResolution(ctx, root, symbols)
+	if err != nil {
+		slog.Error("go/types: background warm failed — cache stays at basic tier", "root", root, "err", err)
+		recordBackgroundWarm("failed")
 		return
 	}
 
-	// Upgrade existing cache entry to enhanced tier.
+	// A successful warm (err == nil) must always refresh the cached entry,
+	// not only when typedCG != nil. Two states reach this goroutine (gated
+	// on cg.Backend != BackendGoTypes in BuildFromRepo, repo.go:108):
+	//
+	//   1. Cold sync load FAILED (tryGoTypesResolution returned (nil, err)):
+	//      the cached entry has Warming=true and NO IMPLEMENTS edges
+	//      (ExtractGoImplements was skipped on the cold path, issue #735).
+	//      The background warm exists precisely for this case.
+	//   2. Sync load SUCCEEDED with zero typed call edges (tryGoTypesResolution
+	//      returned (nil, nil)): the cached entry already has Warming=false
+	//      and IMPLEMENTS present (EnrichWithTypedResolution ran
+	//      ExtractGoImplements on the load-succeeded branch).
+	//
+	// When the patient retry SUCCEEDS but yields zero typed edges (typedCG ==
+	// nil, err == nil), the pre-fix code guarded the cache update behind
+	// `if typedCG != nil` and never touched the entry. For state 1 that left
+	// Warming=true and IMPLEMENTS absent for the full 5-minute cgCacheTTL —
+	// even though recordBackgroundWarm("completed") fired and the warm was
+	// done. The round-3 comment "IMPLEMENTS edges were already added on the
+	// synchronous request path" was true for state 2 only — inverted for the
+	// case the background warm was written for. Every consumer serving from
+	// that stale entry kept emitting "type-aware enrichment is warming, retry
+	// for the enhanced tier", and the retry hit the same stale cache — the
+	// note became a lie for five minutes, defeating its purpose.
+	//
+	// On a successful warm we now always: clear Warming (the warm is done),
+	// and ensure IMPLEMENTS edges are present. IMPLEMENTS extraction is cheap
+	// on a warm load (shares the CachedLoadPackages the retry just populated),
+	// but state 2 already carries them — check first (hasImplementsEdge) to
+	// avoid duplicates rather than dedupe after the fact.
 	if cached, ok := cgCache.get(cacheKey, root); ok {
-		enhanced := MergeCallGraphs(cached, typedCG)
-		enhanced.Tier = "enhanced"
-		enhanced.Backend = BackendGoTypes
-		cgCache.set(cacheKey, enhanced, root)
+		if typedCG != nil {
+			cached = MergeCallGraphs(cached, typedCG)
+			cached.Tier = "enhanced"
+			cached.Backend = BackendGoTypes
+		} else {
+			// MergeCallGraphs returns a fresh *CallGraph, so the typedCG
+			// != nil branch cannot alias the LRU entry. The zero-edge
+			// branch (typedCG == nil) does NOT — `cached` still points at
+			// the LRU entry's own *CallGraph, which is shared with any
+			// concurrent BuildFromRepo cache hit (repo.go:76) reading it
+			// while this background goroutine (repo.go:109) runs. Mutating
+			// it in place races on Warming and the TypeRels slice header
+			// + backing array (round-5 defect, introduced by c2a7cf11).
+			//
+			// Build a shallow struct copy and give it a fresh TypeRels
+			// backing array before appending. A shallow copy alone is NOT
+			// enough: it shares the TypeRels slice header and its backing
+			// array, so append on the copy writes into the shared array
+			// whenever capacity allows. Allocating a new slice and
+			// copying the elements severs both the header alias and the
+			// backing-array alias. The other slice/map fields (Edges,
+			// Symbols, HookCallbacks, UsesIndex) are carried over
+			// read-only — this branch never writes them, and concurrent
+			// reads of a shared slice/map are safe in Go, so they need no
+			// copy here. Tier and Backend are scalars left unchanged on
+			// this branch.
+			cp := *cached
+			cp.TypeRels = append([]parser.TypeRelationship(nil), cached.TypeRels...)
+			cached = &cp
+		}
+		cached.Warming = false
+		if !hasImplementsEdge(cached) {
+			cached.TypeRels = append(cached.TypeRels, ExtractGoImplements(ctx, root)...)
+		}
+		cgCache.set(cacheKey, cached, root)
 	}
-	slog.Info("go/types: GOCACHE warmed, cache upgraded to enhanced", "root", root)
+	slog.Info("go/types: GOCACHE warmed", "root", root)
+	// Record the root as warmed so BuildFromRepo's cache-hit path can detect
+	// sibling keys (different scope, same root) whose Warming flag was never
+	// cleared — their warm was suppressed as `skipped` by the root-keyed
+	// single-flight guard. The stored time.Time is the warm completion
+	// instant; BuildFromRepo diverts only entries whose at predates it, so
+	// an entry re-cached after a failed rebuild (fresh at) is NOT diverted
+	// again — the round-8 loop guard. Stored ONLY on success: a failed warm
+	// must NOT store, so siblings keep their honest "retry for the enhanced
+	// tier" note.
+	goTypesWarmedSet.Store(root, time.Now())
+	recordBackgroundWarm("completed")
+}
+
+// hasImplementsEdge reports whether cg already carries at least one
+// IMPLEMENTS TypeRelationship. Used by warmGoTypesCache to decide whether to
+// call ExtractGoImplements on a successful zero-edge warm: state 2 (sync load
+// succeeded with zero call edges) already appended IMPLEMENTS on the
+// synchronous path, so re-running extraction here would duplicate them; state
+// 1 (sync load failed) has none and needs them restored.
+func hasImplementsEdge(cg *CallGraph) bool {
+	for _, rel := range cg.TypeRels {
+		if rel.Kind == parser.RelImplements {
+			return true
+		}
+	}
+	return false
 }

@@ -234,3 +234,62 @@ func TestUnderstand_ColdLocalGraph_DoesNotGate(t *testing.T) {
 		t.Errorf("expected symbol Foo, got %q", result.Symbol.Name)
 	}
 }
+
+// TestUnderstand_ColdGoTypes_WarmingNoteInResponse verifies that when
+// BuildFromRepo returns a CallGraph with Warming=true (go/types enrichment
+// is warming in the background), the understand response carries a
+// "type-aware enrichment is warming, retry" note so the agent knows to retry
+// for the enhanced tier. On the warm path (Warming=false), the note must NOT
+// appear.
+func TestUnderstand_WarmingNote_DegradedPathOnly(t *testing.T) {
+	origBuildFromRepo := understandBuildFromRepo
+	defer func() { understandBuildFromRepo = origBuildFromRepo }()
+
+	// Degraded path: Warming=true — the note MUST appear.
+	understandBuildFromRepo = func(_ context.Context, input callgraph.TraceRepoInput) (*callgraph.CallGraph, error) {
+		return &callgraph.CallGraph{
+			Symbols: []*parser.Symbol{makeTestSym("Foo", filepath.Join(input.Root, "foo.go"))},
+			Tier:    "basic",
+			Warming: true,
+		}, nil
+	}
+
+	root := t.TempDir()
+	input := UnderstandInput{Repo: root, Symbol: "Foo"}
+	deps := analyze.Deps{}
+
+	res, err := handleUnderstand(context.Background(), input, deps, nil, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || res.IsError {
+		t.Fatalf("expected non-error result, got: %+v", res)
+	}
+
+	text := textContentOf(t, res)
+	if !strings.Contains(text, "type-aware enrichment is warming") || !strings.Contains(text, "retry") {
+		t.Errorf("degraded path: expected warming+retry note in response, got: %s", text)
+	}
+
+	// Warm path: Warming=false — the note must NOT appear.
+	understandBuildFromRepo = func(_ context.Context, input callgraph.TraceRepoInput) (*callgraph.CallGraph, error) {
+		return &callgraph.CallGraph{
+			Symbols: []*parser.Symbol{makeTestSym("Foo", filepath.Join(input.Root, "foo.go"))},
+			Tier:    "enhanced",
+			Warming: false,
+		}, nil
+	}
+
+	resWarm, err := handleUnderstand(context.Background(), input, deps, nil, nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resWarm == nil || resWarm.IsError {
+		t.Fatalf("expected non-error result, got: %+v", resWarm)
+	}
+
+	textWarm := textContentOf(t, resWarm)
+	if strings.Contains(textWarm, "type-aware enrichment is warming") {
+		t.Errorf("warm path: expected NO warming note, got: %s", textWarm)
+	}
+}

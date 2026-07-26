@@ -27,6 +27,14 @@ type CallGraph struct {
 	HookCallbacks []string                  // function names registered as hook callbacks
 	Tier          string                    // "basic" (tree-sitter), "enhanced" (go/types merged), "full" (future)
 	Backend       string                    // resolution backend: "tree-sitter", "tree-sitter+go/types", "tree-sitter+scip"
+	// Warming is set when go/types enrichment was skipped because the
+	// go/packages load was cold (tryGoTypesResolution returned nil). The
+	// background warm (warmGoTypesCache) is running and will upgrade the
+	// cached entry; a retry will return the enhanced tier. Callers should
+	// surface a "type-aware enrichment is warming, retry for the enhanced
+	// tier" note so the agent knows to retry instead of treating the
+	// tree-sitter-only result as final.
+	Warming bool
 	// UsesIndex maps a target file's relative path to a list of relative paths
 	// of Astro files that render it as a component (<Foo />). Populated by
 	// ResolveTemplateRefs during BuildFromRepo. Enables impact_analysis to

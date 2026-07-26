@@ -130,6 +130,14 @@ func handleUnderstand(ctx context.Context, input UnderstandInput, deps analyze.D
 	}
 	result := understandCompound(ctx, matches[0], cg, opts)
 
+	// Surface the warming note when go/types enrichment was skipped on a cold
+	// cache (issue #735). The background warm is running; a retry will return
+	// the enhanced tier with type-aware call resolution.
+	if cg.Warming {
+		result.Warnings = append(result.Warnings,
+			"type-aware enrichment is warming in the background; retry for the enhanced tier (go/types interface dispatch resolution)")
+	}
+
 	// Reverse-map container-internal paths back to host-side paths so callers
 	// see clickable file locations matching their local checkout.
 	if len(deps.PathMappings) > 0 {

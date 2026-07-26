@@ -34,20 +34,31 @@ var calleesEmittedTotal = promauto.NewCounterVec(
 	[]string{"language", "kind"},
 )
 
-// gocode_callgraph_gotypes_fallback_total counts each time go/types typed resolution
-// fails and the call graph degrades to tree-sitter-only edges.
+// gocode_callgraph_gotypes_fallback_total counts each time go/types typed
+// resolution did not produce typed call edges, by reason.
 //
 // Labels:
 //   - reason: "deadline" — packages.Load context deadline exceeded;
-//     "load_error" — any other packages.Load failure.
+//     "load_error" — any other packages.Load failure;
+//     "no_edges" — packages.Load SUCCEEDED but goanalysis.Resolve produced
+//     zero typed call edges (e.g. a Go module with only type declarations and
+//     no function calls). This is NOT a fallback in the cold-cache sense —
+//     the load already succeeded, so callers do NOT set Warming and DO run
+//     ExtractGoImplements (issue #467) — but it was invisible before this
+//     label (round 1's tryGoTypesResolution returned nil with no counter and
+//     no log), so operators could not tell how often the typed-CALLS tier was
+//     empty. The label name "no_edges" mirrors gocode_scip_fallback_total's
+//     same-named reason for "index read but contained 0 typed edges".
 //
-// A non-zero rate means typed Go call edges are being dropped silently. Operators
-// can alert on this to detect repeated cold-GOCACHE deadline misses or environment
-// issues with packages.Load. Before this counter, the only signal was a WARN log.
+// A non-zero "deadline"/"load_error" rate means typed Go call edges are being
+// dropped silently. A non-zero "no_edges" rate is informational — those repos
+// still get IMPLEMENTS edges — but it tells operators how many repos land on
+// the basic CALLS tier despite a successful load. Before this counter, the
+// only signal was a WARN log (and for no_edges, not even that).
 var callgraphGotypesFallbackTotal = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "gocode_callgraph_gotypes_fallback_total",
-		Help: "Times go/types typed resolution failed and the call graph fell back to tree-sitter-only edges, by reason (deadline, load_error).",
+		Help: "Times go/types typed resolution produced no typed call edges, by reason (deadline, load_error, no_edges).",
 	},
 	[]string{"reason"},
 )
@@ -59,6 +70,14 @@ func recordGotypesFallback(err error) {
 		reason = "deadline"
 	}
 	callgraphGotypesFallbackTotal.WithLabelValues(reason).Inc()
+}
+
+// recordGotypesNoEdges bumps the go/types fallback counter with reason="no_edges"
+// for the case where packages.Load succeeded but goanalysis.Resolve produced
+// zero typed call edges. See callgraphGotypesFallbackTotal's doc for why this
+// case gets its own label rather than staying invisible.
+func recordGotypesNoEdges() {
+	callgraphGotypesFallbackTotal.WithLabelValues("no_edges").Inc()
 }
 
 // gocode_scip_fallback_total counts each time a SCIP indexer fails and the call
@@ -131,6 +150,37 @@ var eagerWarmTotal = promauto.NewCounterVec(
 // recordEagerWarm bumps the eager-warm counter for one outcome.
 func recordEagerWarm(outcome string) {
 	eagerWarmTotal.WithLabelValues(outcome).Inc()
+}
+
+// gocode_callgraph_background_warm_total counts on-demand background go/types
+// warm outcomes (warmGoTypesCache in repo.go). This is the warm path that
+// upgrades a cold tree-sitter-only CallGraph to the enhanced tier after the
+// request has already returned the degraded result.
+//
+// Outcomes (cardinality 3, no repo label to keep cardinality bounded):
+//   - completed — packages.Load succeeded, cache upgraded to enhanced
+//   - failed    — packages.Load failed (cold GOCACHE, unbuildable deps,
+//     timeout); the cache stays at basic tier
+//   - skipped   — already warming (duplicate goroutine suppressed by
+//     goTypesWarmingSet)
+//
+// Operators should alert on a sustained non-zero `failed` rate: it means the
+// background warm never succeeds for a repo, so every cold request returns
+// tree-sitter-only and the enhanced tier is never reached. Before this
+// counter, the only signal was a WARN log swallowed as "non-fatal" — the
+// pre-warm `go build` step that failed on every cgo repo (issue #735) was
+// invisible to operators.
+var backgroundWarmTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "gocode_callgraph_background_warm_total",
+		Help: "On-demand background go/types warm outcomes, labelled by outcome (completed, failed, skipped).",
+	},
+	[]string{"outcome"},
+)
+
+// recordBackgroundWarm bumps the background-warm counter for one outcome.
+func recordBackgroundWarm(outcome string) {
+	backgroundWarmTotal.WithLabelValues(outcome).Inc()
 }
 
 // gocode_parser_unresolved_alias_total counts import paths in Astro frontmatter

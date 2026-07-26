@@ -174,6 +174,7 @@ func Run(ctx context.Context, input Input, deps Deps) (*Result, error) {
 	expanded := expandFromSeeds(seedFiles, data.FileImports, input.ExpandHops)
 
 	// --- Step 5b: call-graph BFS expansion (optional) ---
+	var warmingNote string
 	if input.IncludeCallGraph && deps.BuildCallGraph != nil {
 		cg, cgErr := deps.BuildCallGraph(ctx, input.Root)
 		if cgErr != nil {
@@ -181,6 +182,9 @@ func Run(ctx context.Context, input Input, deps Deps) (*Result, error) {
 		} else if cg != nil {
 			cgExpanded := expandFromCallGraph(seedFiles, cg, input.ExpandHops)
 			expanded = mergeExpandResults(expanded, cgExpanded)
+			if cg.Warming {
+				warmingNote = "type-aware enrichment is warming in the background; retry for the enhanced tier (go/types interface dispatch resolution)"
+			}
 		}
 	}
 	slog.Info("research.run: DAG + callgraph expansion done",
@@ -283,6 +287,10 @@ func Run(ctx context.Context, input Input, deps Deps) (*Result, error) {
 		slog.Int("pruned", pruned),
 		slog.Duration("total", time.Since(t0)))
 
+	var warnings []string
+	if warmingNote != "" {
+		warnings = []string{warmingNote}
+	}
 	return &Result{
 		Seeds:           seeds,
 		Graph:           graph,
@@ -290,6 +298,7 @@ func Run(ctx context.Context, input Input, deps Deps) (*Result, error) {
 		EstimatedTokens: estimatedTokens,
 		PrunedFiles:     pruned,
 		Mode:            mode,
+		Warnings:        warnings,
 	}, nil
 }
 

@@ -45,10 +45,17 @@ type researchRespXML struct {
 	// first when the response hits the client truncation ceiling. XML element
 	// order follows struct field order, so Map must precede Seeds/Graph here.
 	Map *xmlCDATA `xml:"map,omitempty"`
+	// Warnings carries meta-signals about the analysis tier (e.g. a go/types
+	// warming note). Nil/omitted when there are no warnings — the common case.
+	Warnings *researchWarningsXML `xml:"warnings,omitempty"`
 	// Seeds/Graph are nil (omitted) in compact mode or when empty, matching the
 	// prior guard `!input.Compact && len(...) > 0`.
 	Seeds *researchSeedsXML `xml:"seeds,omitempty"`
 	Graph *researchGraphXML `xml:"graph,omitempty"`
+}
+
+type researchWarningsXML struct {
+	Items []string `xml:"warning"`
 }
 
 type researchStatsXML struct {

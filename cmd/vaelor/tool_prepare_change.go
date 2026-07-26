@@ -26,6 +26,10 @@ type PrepareChangeInput struct {
 
 const maxPrepareChangeDepth = 10
 
+// prepareChangeBuildFromRepo is the production seam for callgraph.BuildFromRepo;
+// handler-level tests can override it to avoid heavy parsing.
+var prepareChangeBuildFromRepo = callgraph.BuildFromRepo
+
 // couplingMinCoChanges is the minimum number of shared git commits required
 // to consider two files "coupled" — matches compare.defaultMinCoChanges so
 // the signal is comparable across tools.
@@ -62,7 +66,7 @@ func handlePrepareChange(ctx context.Context, input PrepareChangeInput, deps ana
 	}
 	defer cleanup()
 
-	cg, err := callgraph.BuildFromRepo(ctx, callgraph.TraceRepoInput{
+	cg, err := prepareChangeBuildFromRepo(ctx, callgraph.TraceRepoInput{
 		Root:     root,
 		Focus:    input.Focus,
 		Language: input.Language,
@@ -80,6 +84,14 @@ func handlePrepareChange(ctx context.Context, input PrepareChangeInput, deps ana
 		opts.Graph = deps.Graph
 	}
 	result := compound.PrepareChange(ctx, cg, input.Symbol, opts)
+
+	// Surface the warming note when go/types enrichment was skipped on a cold
+	// cache (issue #735). The background warm is running; a retry will return
+	// the enhanced tier with type-aware call resolution.
+	if cg.Warming {
+		result.Warnings = append(result.Warnings,
+			"type-aware enrichment is warming in the background; retry for the enhanced tier (go/types interface dispatch resolution)")
+	}
 
 	if !result.Found {
 		msg := fmt.Sprintf("symbol %q not found in repository", input.Symbol)
