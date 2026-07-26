@@ -2,6 +2,7 @@ package callgraph
 
 import (
 	"path/filepath"
+	"strconv"
 
 	"github.com/anatolykoptev/vaelor/internal/goanalysis"
 	"github.com/anatolykoptev/vaelor/internal/parser"
@@ -34,8 +35,17 @@ func ConvertToCallGraph(typedEdges []goanalysis.TypedEdge, tsSymbols []*parser.S
 
 // MergeCallGraphs merges a tree-sitter call graph with a typed call graph.
 // Typed edges take priority; unmatched tree-sitter edges are appended.
-// HookCallbacks are preserved from the tree-sitter graph.
-// Returns nil only if both inputs are nil.
+//
+// Metadata fields (Warming, TypeRels, UsesIndex, HookCallbacks) are carried
+// from tsGraph — the typed/SCIP graphs never set them. TypeRels is unioned
+// with dedup in case either side carries them. Tier and Backend are left
+// zero-valued; every caller re-assigns them immediately after the merge.
+//
+// The result is built by shallow-copying tsGraph and overriding the merged
+// fields. This ensures a future field added to CallGraph is carried from
+// tsGraph by default rather than silently dropped. A compile-time guard that
+// fails loudly on new fields would require reflection; none exists cleanly
+// in Go, so the copy-then-override shape is the next best thing.
 func MergeCallGraphs(tsGraph, typedGraph *CallGraph) *CallGraph {
 	if typedGraph == nil {
 		return tsGraph
@@ -61,11 +71,47 @@ func MergeCallGraphs(tsGraph, typedGraph *CallGraph) *CallGraph {
 
 	symbols := mergeSymbols(typedGraph.Symbols, tsGraph.Symbols)
 
-	return &CallGraph{
-		Edges:         merged,
-		Symbols:       symbols,
-		HookCallbacks: tsGraph.HookCallbacks,
+	// Shallow-copy tsGraph to carry all metadata fields by default, then
+	// override the merged fields. Tier/Backend are zeroed — callers re-assign.
+	out := *tsGraph
+	out.Edges = merged
+	out.Symbols = symbols
+	out.TypeRels = mergeTypeRels(tsGraph.TypeRels, typedGraph.TypeRels)
+	out.Tier = ""
+	out.Backend = ""
+	return &out
+}
+
+// mergeTypeRels unions two TypeRels slices, deduplicating by
+// Subject+Target+Kind+File+Line. Primary (tsGraph) entries are kept first.
+func mergeTypeRels(primary, secondary []parser.TypeRelationship) []parser.TypeRelationship {
+	if len(primary) == 0 {
+		return secondary
 	}
+	if len(secondary) == 0 {
+		return primary
+	}
+	seen := make(map[string]struct{}, len(primary)+len(secondary))
+	result := make([]parser.TypeRelationship, 0, len(primary)+len(secondary))
+	for _, rel := range primary {
+		k := relKey(rel)
+		if _, ok := seen[k]; !ok {
+			seen[k] = struct{}{}
+			result = append(result, rel)
+		}
+	}
+	for _, rel := range secondary {
+		k := relKey(rel)
+		if _, ok := seen[k]; !ok {
+			seen[k] = struct{}{}
+			result = append(result, rel)
+		}
+	}
+	return result
+}
+
+func relKey(r parser.TypeRelationship) string {
+	return r.Subject + ":" + r.Target + ":" + string(r.Kind) + ":" + r.File + ":" + strconv.FormatUint(uint64(r.Line), 10)
 }
 
 // buildConvertIndexes creates lookup maps for symbol resolution during conversion.

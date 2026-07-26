@@ -12,10 +12,13 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/anatolykoptev/vaelor/internal/goanalysis"
 	"github.com/anatolykoptev/vaelor/internal/ingest"
 	"github.com/anatolykoptev/vaelor/internal/parser"
+	sciplib "github.com/sourcegraph/scip/bindings/go/scip"
 )
 
 func TestTraceRepo_Integration(t *testing.T) {
@@ -926,4 +929,175 @@ func main() {}`
 	warmGoTypesCache(dir, seeded.Symbols, key)
 	close(writerDone)
 	<-readerDone
+}
+
+// writeSCIPStreamingIndex serializes a sciplib.Index into the length-delimited
+// streaming format that ReadIndex (IndexVisitor.ParseStreaming) expects. Each
+// sub-message (Metadata, Document, ExternalSymbol) is written as
+// tag + varint-length + data. This is the on-disk format of a .scip index file.
+func writeSCIPStreamingIndex(path string, idx *sciplib.Index) error {
+	var buf []byte
+	if idx.Metadata != nil {
+		data, err := proto.Marshal(idx.Metadata)
+		if err != nil {
+			return err
+		}
+		buf = protowire.AppendTag(buf, 1, protowire.BytesType)
+		buf = protowire.AppendVarint(buf, uint64(len(data)))
+		buf = append(buf, data...)
+	}
+	for _, doc := range idx.Documents {
+		data, err := proto.Marshal(doc)
+		if err != nil {
+			return err
+		}
+		buf = protowire.AppendTag(buf, 2, protowire.BytesType)
+		buf = protowire.AppendVarint(buf, uint64(len(data)))
+		buf = append(buf, data...)
+	}
+	for _, sym := range idx.ExternalSymbols {
+		data, err := proto.Marshal(sym)
+		if err != nil {
+			return err
+		}
+		buf = protowire.AppendTag(buf, 3, protowire.BytesType)
+		buf = protowire.AppendVarint(buf, uint64(len(data)))
+		buf = append(buf, data...)
+	}
+	return os.WriteFile(path, buf, 0o644)
+}
+
+// TestEnrichWithTypedResolution_ColdGo_SCIPSucceeds_PreservesWarming is the
+// integration test for the round-6 defect on issue #735: on a polyglot Go
+// repo where the go/packages LOAD FAILS (cold cache → Warming=true) but SCIP
+// resolution SUCCEEDS (non-Go language indexed), MergeCallGraphs must carry
+// Warming from the base graph. Before the fix, MergeCallGraphs dropped
+// Warming, and the caller set Tier="enhanced" — producing a degraded Go
+// answer labelled enhanced with no retry note, the exact failure this PR
+// exists to prevent.
+//
+// No real SCIP indexer binary is available in the test environment. The test
+// drives the REAL trySCIPResolution → RunIndexerSafe → RunIndexer →
+// ReadIndex → ConvertToEdges → ConvertToCallGraph → MergeCallGraphs path by
+// installing a fake "scip-typescript" script in PATH that writes a
+// pre-serialized SCIP index (constructed via proto.Marshal on a sciplib.Index
+// with a simple main→greet call). This exercises every conversion step
+// except the external indexer's own analysis — the index content is
+// synthetic, not produced by scip-typescript itself.
+func TestEnrichWithTypedResolution_ColdGo_SCIPSucceeds_PreservesWarming(t *testing.T) {
+	dir := t.TempDir()
+
+	// go.mod with a syntax error — packages.Load fails at go.mod parse time
+	// (the genuine load-failed path: tryGoTypesResolution returns (nil, err)).
+	gomod := "module example.com/coldscip\n\ngo 1.21\n\nthis is not valid go.mod syntax\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Trivial main.go — the load fails at go.mod parsing, so content is
+	// irrelevant; it exists so HasGoModule returns true.
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3+ TypeScript files so polyglot.DetectedLanguages includes "typescript"
+	// (minLangFiles=3). Content is irrelevant — the fake indexer ignores the
+	// source and writes a pre-built index.
+	for i := 0; i < 3; i++ {
+		fn := filepath.Join(dir, "file"+string(rune('0'+i))+".ts")
+		if err := os.WriteFile(fn, []byte("export function f"+string(rune('0'+i))+"() {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Build a synthetic SCIP index with one document (main.ts) containing a
+	// main→greet call. ConvertToEdges will extract one typed edge, so
+	// trySCIPResolution returns non-nil.
+	scipIdx := &sciplib.Index{
+		Documents: []*sciplib.Document{
+			{
+				RelativePath: "main.ts",
+				Occurrences: []*sciplib.Occurrence{
+					{
+						Range:       []int32{0, 5, 9},
+						Symbol:      "ts . testpkg main().",
+						SymbolRoles: int32(sciplib.SymbolRole_Definition),
+					},
+					{
+						Range:       []int32{5, 5, 10},
+						Symbol:      "ts . testpkg greet().",
+						SymbolRoles: int32(sciplib.SymbolRole_Definition),
+					},
+					{
+						Range:  []int32{2, 4, 9},
+						Symbol: "ts . testpkg greet().",
+					},
+				},
+				Symbols: []*sciplib.SymbolInformation{
+					{Symbol: "ts . testpkg main().", Kind: sciplib.SymbolInformation_Function, DisplayName: "main"},
+					{Symbol: "ts . testpkg greet().", Kind: sciplib.SymbolInformation_Function, DisplayName: "greet"},
+				},
+			},
+		},
+	}
+
+	// Serialize the index to a file the fake indexer script will copy.
+	indexBytesPath := filepath.Join(dir, "prebuilt_index.scip")
+	if err := writeSCIPStreamingIndex(indexBytesPath, scipIdx); err != nil {
+		t.Fatalf("writeSCIPStreamingIndex: %v", err)
+	}
+
+	// Create a fake "scip-typescript" binary in a temp bin dir. The real
+	// RunIndexer invokes `scip-typescript index` with cmd.Dir=repo root and
+	// expects index.scip at filepath.Join(dir, "index.scip"). The script
+	// copies the pre-built index there.
+	binDir := t.TempDir()
+	fakeIndexer := filepath.Join(binDir, "scip-typescript")
+	script := "#!/bin/sh\ncp \"" + indexBytesPath + "\" ./index.scip\n"
+	if err := os.WriteFile(fakeIndexer, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add the fake binary to PATH so exec.LookPath finds it.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Isolate the SCIP cache so the test doesn't pollute /tmp/scip-cache.
+	// NOTE: scipCache is a package-level var initialized at init time from
+	// scipCacheDir(). t.Setenv("SCIP_CACHE_DIR", ...) does NOT recreate it,
+	// so the cache dir is still /tmp/scip-cache. This is acceptable: the
+	// cache key is content-addressed (lang + hash of repo files), and
+	// t.TempDir gives a unique repo path with unique file contents, so the
+	// key won't collide across test runs. A cache HIT on a second run still
+	// returns the same edges (the cached index is a copy of what the fake
+	// indexer produced), so the test remains valid.
+
+	// Evict any stale goanalysis cache for this root.
+	goanalysis.InvalidateCachedLoad(dir)
+
+	// Construct the ingest.File list for language detection. trySCIPResolution
+	// uses this to detect languages; the actual indexing runs against the dir.
+	files := []*ingest.File{
+		{Path: filepath.Join(dir, "file0.ts"), RelPath: "file0.ts", Language: "typescript"},
+		{Path: filepath.Join(dir, "file1.ts"), RelPath: "file1.ts", Language: "typescript"},
+		{Path: filepath.Join(dir, "file2.ts"), RelPath: "file2.ts", Language: "typescript"},
+	}
+
+	base := &CallGraph{
+		Edges:   []CallEdge{{CalleeName: "tsFunc"}},
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic",
+		Backend: BackendTreeSitter,
+	}
+
+	cg := EnrichWithTypedResolution(context.Background(), dir, base, base.Symbols, files)
+
+	if !cg.Warming {
+		t.Error("expected Warming=true preserved through SCIP merge on cold Go path, got false")
+	}
+	if cg.Tier != "enhanced" {
+		t.Errorf("expected Tier=enhanced (SCIP succeeded), got %q", cg.Tier)
+	}
+	if cg.Backend != BackendSCIP {
+		t.Errorf("expected Backend=%q, got %q", BackendSCIP, cg.Backend)
+	}
 }

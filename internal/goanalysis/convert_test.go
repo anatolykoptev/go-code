@@ -148,6 +148,73 @@ func TestMergeCallGraphs(t *testing.T) {
 	}
 }
 
+func TestMergeCallGraphs_PreservesWarming(t *testing.T) {
+	tsGraph := &callgraph.CallGraph{
+		Edges:   []callgraph.CallEdge{{CalleeName: "foo"}},
+		Symbols: []*parser.Symbol{{Name: "A", Kind: parser.KindFunction, File: "/a.go"}},
+		Warming: true,
+	}
+	typedGraph := &callgraph.CallGraph{
+		Edges:   []callgraph.CallEdge{{CalleeName: "bar"}},
+		Symbols: []*parser.Symbol{{Name: "B", Kind: parser.KindFunction, File: "/b.go"}},
+	}
+
+	merged := callgraph.MergeCallGraphs(tsGraph, typedGraph)
+
+	if !merged.Warming {
+		t.Error("expected Warming=true carried from tsGraph, got false")
+	}
+}
+
+func TestMergeCallGraphs_PreservesTypeRels(t *testing.T) {
+	tsRels := []parser.TypeRelationship{
+		{Subject: "Hello", Target: "Greeter", Kind: parser.RelImplements, File: "/a.go", Line: 5},
+	}
+	tsGraph := &callgraph.CallGraph{
+		Edges:    []callgraph.CallEdge{{CalleeName: "foo"}},
+		Symbols:  []*parser.Symbol{{Name: "A", Kind: parser.KindFunction, File: "/a.go"}},
+		TypeRels: tsRels,
+	}
+	typedGraph := &callgraph.CallGraph{
+		Edges:   []callgraph.CallEdge{{CalleeName: "bar"}},
+		Symbols: []*parser.Symbol{{Name: "B", Kind: parser.KindFunction, File: "/b.go"}},
+	}
+
+	merged := callgraph.MergeCallGraphs(tsGraph, typedGraph)
+
+	if len(merged.TypeRels) != 1 {
+		t.Fatalf("expected 1 TypeRel carried from tsGraph, got %d: %+v", len(merged.TypeRels), merged.TypeRels)
+	}
+	if merged.TypeRels[0].Subject != "Hello" || merged.TypeRels[0].Target != "Greeter" {
+		t.Errorf("expected Hello->Greeter TypeRel, got %+v", merged.TypeRels[0])
+	}
+}
+
+func TestMergeCallGraphs_PreservesUsesIndex(t *testing.T) {
+	tsUses := map[string][]string{
+		"components/Foo.astro": {"pages/index.astro"},
+	}
+	tsGraph := &callgraph.CallGraph{
+		Edges:     []callgraph.CallEdge{{CalleeName: "foo"}},
+		Symbols:   []*parser.Symbol{{Name: "A", Kind: parser.KindFunction, File: "/a.go"}},
+		UsesIndex: tsUses,
+	}
+	typedGraph := &callgraph.CallGraph{
+		Edges:   []callgraph.CallEdge{{CalleeName: "bar"}},
+		Symbols: []*parser.Symbol{{Name: "B", Kind: parser.KindFunction, File: "/b.go"}},
+	}
+
+	merged := callgraph.MergeCallGraphs(tsGraph, typedGraph)
+
+	if len(merged.UsesIndex) != 1 {
+		t.Fatalf("expected UsesIndex with 1 entry carried from tsGraph, got %d entries", len(merged.UsesIndex))
+	}
+	users, ok := merged.UsesIndex["components/Foo.astro"]
+	if !ok || len(users) != 1 || users[0] != "pages/index.astro" {
+		t.Errorf("expected UsesIndex[components/Foo.astro]=[pages/index.astro], got %+v", merged.UsesIndex)
+	}
+}
+
 func TestMergeCallGraphs_NilHandling(t *testing.T) {
 	cg := &callgraph.CallGraph{Edges: []callgraph.CallEdge{{CalleeName: "Foo"}}}
 
