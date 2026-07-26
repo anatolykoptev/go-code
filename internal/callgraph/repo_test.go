@@ -1101,3 +1101,248 @@ func TestEnrichWithTypedResolution_ColdGo_SCIPSucceeds_PreservesWarming(t *testi
 		t.Errorf("expected Backend=%q, got %q", BackendSCIP, cg.Backend)
 	}
 }
+
+// TestBuildFromRepo_SiblingKey_StaleWarmingClearedAfterSuccessfulWarm is the
+// RED test for the round-7 defect on issue #735: the background warm's
+// single-flight guard is root-keyed (goTypesWarmingSet, repo.go:288), so on a
+// cold repo only ONE warm runs and only the warm's OWN key gets its Warming
+// flag cleared in place (repo.go:344-379). Sibling keys — same root, different
+// Focus/Language/IncludeFieldAccess scope — keep Warming=true for the full
+// 5-minute cgCacheTTL because their warm was suppressed as `skipped` and their
+// entry was never touched. A cache hit on such a sibling returns a stale
+// Warming=true graph whose "retry for the enhanced tier" note can never
+// resolve — the retry hits the same stale cache.
+//
+// This test seeds TWO sibling cache keys (differ by IncludeFieldAccess) on one
+// cold root, runs the warm for keyA only, then calls BuildFromRepo for keyB's
+// scope. The fix detects root in goTypesWarmedSet + cached.Warming=true and
+// treats the hit as a miss → rebuilds at the enhanced tier honestly. On
+// 6b5a435b (without the fix) the cache hit returns the stale Warming=true
+// entry directly → both assertions RED.
+func TestBuildFromRepo_SiblingKey_StaleWarmingClearedAfterSuccessfulWarm(t *testing.T) {
+	dir := t.TempDir()
+
+	gomod := "module example.com/siblingwarm\n\ngo 1.22\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Interface + satisfying type, no function calls → goanalysis.Resolve
+	// yields zero typed call edges → warm succeeds with typedCG == nil,
+	// err == nil (the zero-edge branch). IMPLEMENTS is still extracted.
+	src := `package main
+
+type Greeter interface {
+	Greet() string
+}
+
+type Hello struct{}
+
+func (h Hello) Greet() string { return "hello" }
+
+func main() {}`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+	InvalidateBuildCache()
+	// Clean package-level state from prior tests.
+	goTypesWarmingSet.Delete(dir)
+	goTypesWarmedSet.Delete(dir)
+	t.Cleanup(func() { goTypesWarmedSet.Delete(dir) })
+
+	// Two sibling cache keys — same root, different IncludeFieldAccess scope.
+	keyA := cgCacheKey(TraceRepoInput{Root: dir, IncludeFieldAccess: false})
+	keyB := cgCacheKey(TraceRepoInput{Root: dir, IncludeFieldAccess: true})
+
+	// Seed BOTH as state 1 (cold sync load failed): Warming=true, no IMPLEMENTS.
+	seedA := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic", Backend: BackendTreeSitter, Warming: true,
+	}
+	seedB := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic", Backend: BackendTreeSitter, Warming: true,
+	}
+	cgCache.set(keyA, seedA, dir)
+	cgCache.set(keyB, seedB, dir)
+
+	// Run the warm for keyA only (the warm's own key). It succeeds, stores
+	// root in goTypesWarmedSet, and refreshes keyA in place. keyB is never
+	// touched — its warm was suppressed as `skipped`.
+	warmGoTypesCache(dir, seedA.Symbols, keyA)
+
+	// Call BuildFromRepo for keyB's scope. The cache hit returns the stale
+	// entry (Warming=true). The fix detects root in goTypesWarmedSet and
+	// treats it as a miss → rebuilds.
+	cg, err := BuildFromRepo(context.Background(), TraceRepoInput{Root: dir, IncludeFieldAccess: true})
+	if err != nil {
+		t.Fatalf("BuildFromRepo: %v", err)
+	}
+
+	// Assertion A: Warming must be false — the rebuild ran the real path
+	// against a now-warm GOCACHE, which does not set Warming.
+	if cg.Warming {
+		t.Error("expected Warming=false on sibling key after successful warm; the cache hit returned a stale Warming=true entry (round-7: warm's single-flight guard is root-keyed, so sibling scopes never got their flag cleared)")
+	}
+
+	// Assertion B: IMPLEMENTS must be present — proves the rebuild actually
+	// ran (not just a flag clear), and ExtractGoImplements executed on the
+	// warm load-succeeded path.
+	var hasImplements bool
+	for _, rel := range cg.TypeRels {
+		if rel.Kind == parser.RelImplements {
+			hasImplements = true
+			break
+		}
+	}
+	if !hasImplements {
+		t.Error("expected at least one IMPLEMENTS edge on sibling key rebuild; TypeRels is empty (the rebuild should have run ExtractGoImplements on the warm path)")
+	}
+}
+
+// TestBuildFromRepo_SiblingKey_FailedWarm_PreservesHonestWarmingNote pins the
+// honest-failure path: when the background warm FAILS, goTypesWarmedSet is NOT
+// stored, so sibling keys keep their honest "retry for the enhanced tier"
+// note. The fix must NOT divert on a failed warm — the cache hit is returned
+// as-is with Warming=true, so a later retry can still upgrade the entry.
+func TestBuildFromRepo_SiblingKey_FailedWarm_PreservesHonestWarmingNote(t *testing.T) {
+	dir := t.TempDir()
+
+	// Broken go.mod — packages.Load fails at parse time on both the sync and
+	// background paths. warmGoTypesCache records "failed" and does NOT store
+	// root in goTypesWarmedSet.
+	gomod := "module example.com/siblingfail\n\ngo 1.21\n\nthis is not valid go.mod syntax\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+	InvalidateBuildCache()
+	goTypesWarmingSet.Delete(dir)
+	goTypesWarmedSet.Delete(dir)
+	t.Cleanup(func() { goTypesWarmedSet.Delete(dir) })
+
+	keyA := cgCacheKey(TraceRepoInput{Root: dir, IncludeFieldAccess: false})
+	keyB := cgCacheKey(TraceRepoInput{Root: dir, IncludeFieldAccess: true})
+
+	seedA := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic", Backend: BackendTreeSitter, Warming: true,
+	}
+	seedB := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic", Backend: BackendTreeSitter, Warming: true,
+	}
+	cgCache.set(keyA, seedA, dir)
+	cgCache.set(keyB, seedB, dir)
+
+	// Run the warm for keyA — it FAILS (broken go.mod), records "failed",
+	// does NOT store root in goTypesWarmedSet.
+	warmGoTypesCache(dir, seedA.Symbols, keyA)
+
+	// Root must NOT be in goTypesWarmedSet after a failed warm.
+	if _, warmed := goTypesWarmedSet.Load(dir); warmed {
+		t.Fatal("goTypesWarmedSet must NOT contain root after a failed warm (only successful warms store)")
+	}
+
+	// Call BuildFromRepo for keyB's scope. The cache hit returns the stale
+	// entry (Warming=true). Root is NOT in goTypesWarmedSet, so the fix does
+	// NOT divert — returns the stale entry as-is.
+	cg, err := BuildFromRepo(context.Background(), TraceRepoInput{Root: dir, IncludeFieldAccess: true})
+	if err != nil {
+		t.Fatalf("BuildFromRepo: %v", err)
+	}
+
+	// Warming must STILL be true — nothing was warmed, so the note stays
+	// honest and a later retry can still upgrade the entry.
+	if !cg.Warming {
+		t.Error("expected Warming=true PRESERVED on sibling key after a FAILED warm (nothing was warmed; the note must stay honest for a later retry)")
+	}
+}
+
+// TestBuildFromRepo_WarmOwnKey_NotDivertedByWarmedSet is the regression guard
+// for rounds 3-6: the warm's OWN key is refreshed in place by warmGoTypesCache
+// (Warming cleared, Tier/Backend set, IMPLEMENTS present), and the round-7 fix
+// must NOT divert it — cached.Warming is false after the refresh, so the
+// fix's condition (cached.Warming && root in goTypesWarmedSet) is false and
+// the cache hit is returned as-is.
+func TestBuildFromRepo_WarmOwnKey_NotDivertedByWarmedSet(t *testing.T) {
+	dir := t.TempDir()
+
+	gomod := "module example.com/warmown\n\ngo 1.22\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Interface + satisfying type + a concrete method call → goanalysis.Resolve
+	// yields typed call edges → typedCG != nil on the warm → Tier="enhanced",
+	// Backend=BackendGoTypes. The interface also gives IMPLEMENTS edges.
+	src := `package main
+
+type Greeter interface {
+	Greet() string
+}
+
+type Hello struct{}
+
+func (h Hello) Greet() string { return "hello" }
+
+func main() {
+	h := Hello{}
+	h.Greet()
+}`
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goanalysis.InvalidateCachedLoad(dir)
+	InvalidateBuildCache()
+	goTypesWarmingSet.Delete(dir)
+	goTypesWarmedSet.Delete(dir)
+	t.Cleanup(func() { goTypesWarmedSet.Delete(dir) })
+
+	keyA := cgCacheKey(TraceRepoInput{Root: dir})
+
+	// Seed state 1: Warming=true, no IMPLEMENTS, basic tier.
+	seedA := &CallGraph{
+		Symbols: []*parser.Symbol{{Name: "main", Kind: parser.KindFunction, File: filepath.Join(dir, "main.go")}},
+		Tier:    "basic", Backend: BackendTreeSitter, Warming: true,
+	}
+	cgCache.set(keyA, seedA, dir)
+
+	// Run the warm for keyA. It succeeds with typedCG != nil, refreshes keyA
+	// in place: Warming=false, Tier="enhanced", Backend=BackendGoTypes,
+	// IMPLEMENTS present. Root is stored in goTypesWarmedSet.
+	warmGoTypesCache(dir, seedA.Symbols, keyA)
+
+	// Call BuildFromRepo for keyA's scope. Cache hit returns the refreshed
+	// entry (Warming=false). Root IS in goTypesWarmedSet, but cached.Warming
+	// is false → fix condition is false → NOT diverted. Returns as-is.
+	cg, err := BuildFromRepo(context.Background(), TraceRepoInput{Root: dir})
+	if err != nil {
+		t.Fatalf("BuildFromRepo: %v", err)
+	}
+
+	if cg.Warming {
+		t.Error("expected Warming=false on warm's own key (refreshed in place by warmGoTypesCache)")
+	}
+	if cg.Tier != "enhanced" {
+		t.Errorf("expected Tier=enhanced on warm's own key (typedCG != nil), got %q", cg.Tier)
+	}
+	if cg.Backend != BackendGoTypes {
+		t.Errorf("expected Backend=%q on warm's own key, got %q", BackendGoTypes, cg.Backend)
+	}
+	var hasImplements bool
+	for _, rel := range cg.TypeRels {
+		if rel.Kind == parser.RelImplements {
+			hasImplements = true
+			break
+		}
+	}
+	if !hasImplements {
+		t.Error("expected at least one IMPLEMENTS edge on warm's own key (ExtractGoImplements runs on the warm path)")
+	}
+}

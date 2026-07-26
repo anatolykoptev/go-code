@@ -74,8 +74,40 @@ func BuildFromRepo(ctx context.Context, input TraceRepoInput) (*CallGraph, error
 	cacheKey := cgCacheKey(input)
 	if !input.Refresh {
 		if cached, ok := cgCache.get(cacheKey, input.Root); ok {
-			slog.Debug("callgraph: BuildFromRepo cache hit", slog.String("root", input.Root))
-			return cached, nil
+			// Sibling-stale Warming detection (round-7, issue #735). The
+			// background warm's single-flight guard is root-keyed
+			// (goTypesWarmingSet, repo.go:288), so on a cold repo only ONE
+			// warm runs and only the warm's OWN key gets its Warming flag
+			// cleared in place (repo.go:344-379). Sibling keys — same root,
+			// different Focus/Language/IncludeFieldAccess scope — keep
+			// Warming=true for the full cgCacheTTL because their warm was
+			// suppressed as `skipped` and their entry was never touched. A
+			// cache hit on such a sibling returns a stale Warming=true graph
+			// whose "retry for the enhanced tier" note can never resolve.
+			//
+			// If the root has been warmed (goTypesWarmedSet) but this cached
+			// entry still advertises Warming, treat it as a MISS and fall
+			// through to the normal rebuild. The rebuild runs against a
+			// now-warm GOCACHE so it is fast and returns at the enhanced tier
+			// honestly, with IMPLEMENTS present. Clearing the flag alone
+			// would leave a basic-tier answer that merely stops advertising
+			// it could be better — a silent downgrade. Do NOT mutate the
+			// cached entry: cgCache.get releases c.mu before returning and
+			// the *CallGraph is shared with concurrent readers (round-5
+			// defect, repo_cache.go:66-72).
+			if cached.Warming {
+				if _, warmed := goTypesWarmedSet.Load(input.Root); warmed {
+					slog.Info("callgraph: cache hit with stale Warming flag after successful background warm; rebuilding",
+						slog.String("root", input.Root))
+					// Fall through to rebuild below.
+				} else {
+					slog.Debug("callgraph: BuildFromRepo cache hit", slog.String("root", input.Root))
+					return cached, nil
+				}
+			} else {
+				slog.Debug("callgraph: BuildFromRepo cache hit", slog.String("root", input.Root))
+				return cached, nil
+			}
 		}
 	}
 
@@ -254,6 +286,23 @@ func buildUsesIndex(results []parseResult, root string) map[string][]string {
 // goTypesWarmingSet tracks repos currently being warmed to avoid duplicate goroutines.
 var goTypesWarmingSet sync.Map
 
+// goTypesWarmedSet tracks repos whose background go/types warm has COMPLETED
+// successfully. Keyed by root (not by cacheKey) deliberately: the single-flight
+// guard (goTypesWarmingSet) is root-keyed too, so on a cold repo only ONE warm
+// runs and only ONE key — the warm's own — gets its Warming flag cleared in
+// place (repo.go:344-379). Sibling keys (same root, different
+// Focus/Language/IncludeFieldAccess scope) keep Warming=true for the full
+// cgCacheTTL because their warm was suppressed as `skipped` (repo.go:288) and
+// their entry was never touched. BuildFromRepo's cache-hit path checks this
+// set: if a hit still advertises Warming but the root has been warmed, it
+// treats the hit as a miss and rebuilds (repo.go:76) — the rebuild runs
+// against a now-warm GOCACHE and returns at the enhanced tier honestly.
+//
+// Growth: one entry per repo root for the process lifetime (~39 Go repos on
+// the box). Lost on restart — after a restart the pre-existing sibling-stale
+// behaviour returns for one TTL window. Both are acceptable; no eviction.
+var goTypesWarmedSet sync.Map
+
 // buildPrewarmEnv returns the environment for the go build pre-warm subprocess.
 // CGO_ENABLED=0 is required: tree-sitter grammars need C headers that are absent
 // outside the container build context. Without it the build fails instantly and
@@ -379,6 +428,12 @@ func warmGoTypesCache(root string, symbols []*parser.Symbol, cacheKey string) {
 		cgCache.set(cacheKey, cached, root)
 	}
 	slog.Info("go/types: GOCACHE warmed", "root", root)
+	// Record the root as warmed so BuildFromRepo's cache-hit path can detect
+	// sibling keys (different scope, same root) whose Warming flag was never
+	// cleared — their warm was suppressed as `skipped` by the root-keyed
+	// single-flight guard. Stored ONLY on success: a failed warm must NOT
+	// store, so siblings keep their honest "retry for the enhanced tier" note.
+	goTypesWarmedSet.Store(root, true)
 	recordBackgroundWarm("completed")
 }
 
