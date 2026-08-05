@@ -74,6 +74,47 @@ func SetEmbeddingsCoverageRows(repoKey string, n int) {
 	embeddingsCoverageRows.WithLabelValues(repoKey).Set(float64(n))
 }
 
+// gocode_orphan_sweep_category_keys is a per-category gauge recording the
+// number of distinct repo_keys the orphan_sweep tool identified in each
+// category during its last run. Categories:
+//   - embeddings_not_in_state: code_embeddings rows whose repo_key has no
+//     code_repo_state row (the original sweep; also reported by
+//     gocode_orphan_repo_keys for backward compatibility).
+//   - path_missing: code_repo_state rows whose source_path is non-empty but
+//     the directory is gone from disk — the repo was deleted via
+//     ReleaseCloneRef/CleanupCloneDir without a state-row cleanup.
+//   - pathless: code_repo_state rows with an empty source_path —
+//     unidentifiable tombstones whose original root is gone.
+//
+// Pre-touched to 0 for all three categories at boot so a zero reads as
+// "measured zero" and not "never wired" — a gauge that only appears when
+// non-zero cannot be alerted on with Prometheus absent().
+//
+// Cardinality: 1 label (category) — bounded to 3 values.
+var orphanSweepCategoryKeys = promauto.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "gocode_orphan_sweep_category_keys",
+		Help: "Distinct repo_keys per orphan_sweep category (embeddings_not_in_state, path_missing, pathless); 0 = clean or not run.",
+	},
+	[]string{"category"},
+)
+
+// SetOrphanSweepCategoryKeys sets the gocode_orphan_sweep_category_keys gauge
+// for one category. Called by the orphan_sweep handler after each category's
+// preview or delete pass.
+func SetOrphanSweepCategoryKeys(category string, n float64) {
+	orphanSweepCategoryKeys.WithLabelValues(category).Set(n)
+}
+
+// WarmOrphanSweepCategoryKeys pre-touches the gauge to 0 for all three
+// categories at boot so the series exists before any sweep — a gauge that
+// only appears when non-zero cannot be alerted on with absent().
+func WarmOrphanSweepCategoryKeys() {
+	for _, c := range []string{"embeddings_not_in_state", "path_missing", "pathless"} {
+		orphanSweepCategoryKeys.WithLabelValues(c).Set(0)
+	}
+}
+
 // gocode_orphan_prevented_total counts first-index embedding rows rolled back
 // via a compensating DeleteRepo after a repo_state write failure (or embedChunks
 // partial failure). Each increment is one orphan averted: without the compensate,

@@ -353,6 +353,14 @@ func registerTools(ctx context.Context, server *mcp.Server, cfg Config, reg *kit
 	// SIGINT/SIGTERM instead of leaking on every shutdown/re-init.
 	startOrphanGaugeWarm(ctx, semDeps.Store)
 
+	// Orphan-sweep per-category gauge — pre-touch all three categories to 0
+	// at boot so a zero reads as "measured zero" and not "never wired" (a
+	// gauge that only appears when non-zero cannot be alerted on with
+	// Prometheus absent()). Unconditional (not DB-gated) because the gauge
+	// series must exist even when DATABASE_URL is unset — the tool is
+	// disabled in that case but the metric should still read 0, not absent.
+	embeddings.WarmOrphanSweepCategoryKeys()
+
 	// Code-graph age gauge + zero-embeddings desync counter — boot warm, both
 	// extracted to their own functions rather than inlined here: registerTools
 	// already exceeds the gocognit threshold (baseline 40 > 20 on main before
