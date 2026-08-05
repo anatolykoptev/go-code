@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.63.0](https://github.com/anatolykoptev/vaelor/compare/v1.62.1...v1.63.0) (2026-08-05)
+
+
+### Added
+
+* **orphan_sweep:** add categories for dead state-row cleanup ([#766](https://github.com/anatolykoptev/vaelor/issues/766)) ([15deb11](https://github.com/anatolykoptev/vaelor/commit/15deb1149c7d96da6cb4230e6030d7772cec9490))
+
 ## [1.62.1](https://github.com/anatolykoptev/vaelor/compare/v1.62.0...v1.62.1) (2026-07-26)
 
 
