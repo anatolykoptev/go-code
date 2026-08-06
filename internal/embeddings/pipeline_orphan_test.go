@@ -501,22 +501,29 @@ func TestDeleteExplicitOrphans_TrueOrphansAcross500Boundary(t *testing.T) {
 		"590 rows must survive; fewer means non-orphan rows were wrongly deleted")
 }
 
-// TestDeleteExplicitOrphans_ShrinkGuardViaPipeline verifies that when seen < 70% of existing,
-// deleteIntraKeyOrphans is skipped and the shrink-guard counter increments.
-// This is a direct-store-level test of the guard in DeleteExplicitOrphans caller
-// (pipeline.go deleteIntraKeyOrphans helper) via a full IndexRepo run.
+// TestDeleteExplicitOrphans_ShrinkGuardViaPipeline is F2: symbol-orphan
+// deletion is STILL shrink-gated. Same ratchet state as F1, but the file
+// EXISTS on disk and only symbols are missing from the parse. The reconcile
+// hook sees the file exists → deletes nothing. deleteIntraKeyOrphans is the
+// only path that would delete the rows, and the shrink guard fires → rows
+// SURVIVE.
 //
-// Setup: seed 600 rows, then replace the source with only 100 symbols (partial-parse
-// simulation). The shrink-guard must fire (100/600 < 0.7) and leave 600 rows intact.
+// Setup: seed 600 rows under "legacy_file.go" with symbol names that do NOT
+// match any parsed symbol. Create "legacy_file.go" on disk with a dummy
+// function so the reconcile hook sees the file exists and does not delete
+// those rows. Index with only 16 symbols (16/600 < 0.7 → guard fires).
 //
-// RED on origin/main: no shrink-guard; the NOT-IN anti-join would delete ~500 rows
-// -> rows count < 600 -> assert.Len fails.
-// GREEN after fix: guard fires, 0 rows deleted, all 600 survive.
+// F2 — symbol-orphan deletion is STILL shrink-gated.
+// Mutation: remove the `if shrinkGuardFires(seen, existing)` guard from
+// deleteIntraKeyOrphans in pipeline.go → the 600 orphan rows (symbols not in
+// parsed set) are deleted → assert.Len(legacyRows, 600) goes RED.
+//
+// DB-gated: needs a real store to run a full IndexRepo.
 func TestDeleteExplicitOrphans_ShrinkGuardViaPipeline(t *testing.T) {
 	p, store := testPipeline(t)
 	ctx := context.Background()
 	const repo = "test/shrink-guard-pipeline"
-	cleanRepo(t, store, repo)
+	cleanRepoFull(t, store, repo)
 
 	// First, write 600 rows directly (simulating a prior full index).
 	const total = 600
@@ -530,10 +537,14 @@ func TestDeleteExplicitOrphans_ShrinkGuardViaPipeline(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, preRows, total, "precondition: 600 rows seeded")
 
-	// Now IndexRepo against a fresh source with only ~16 symbols
-	// (100/600 = 16.7% < 70% threshold -> shrink-guard fires).
-	// Use a small temp dir with a few functions.
+	// Create "legacy_file.go" on disk with a dummy function so the reconcile
+	// hook sees the file exists and does NOT delete those rows. Without this,
+	// the un-gated reconcile hook would delete the rows (F1 proves that),
+	// making this test vacuously pass without exercising the shrink guard.
 	dir := t.TempDir()
+	writeTempGoFile(t, dir, "legacy_file.go", []string{"LegacyStub"})
+
+	// Index with only 16 symbols in main.go (16+1=17/600 < 0.7 → guard fires).
 	smallNames := make([]string, 16)
 	for i := range smallNames {
 		smallNames[i] = fmt.Sprintf("NewFunc%02d", i)
@@ -551,11 +562,16 @@ func TestDeleteExplicitOrphans_ShrinkGuardViaPipeline(t *testing.T) {
 	assert.Greater(t, afterSkipped, beforeSkipped,
 		"orphanDeleteSkippedTotal{reason=shrink_guard} must increment when seen < 70%% of existing")
 
-	// The legacy rows must NOT have been bulk-deleted.
+	// The 600 original legacy rows must NOT have been bulk-deleted. The
+	// newly-embedded LegacyStub (from the on-disk legacy_file.go) adds 1
+	// row, so the total is total+1 = 601. On mutation (remove the shrink
+	// guard from deleteIntraKeyOrphans), the 600 original orphan rows are
+	// deleted and only 1 (LegacyStub) remains → assert.Len goes RED.
 	legacyRows, err := store.GetSymbolsForFile(ctx, repo, "legacy_file.go")
 	require.NoError(t, err)
-	assert.Len(t, legacyRows, total,
-		"all 600 legacy rows must survive when shrink-guard fires (partial-parse protection)")
+	assert.Len(t, legacyRows, total+1,
+		"all 600 original legacy rows + 1 newly-embedded LegacyStub must survive "+
+			"when shrink-guard fires — if 1, the guard was removed from deleteIntraKeyOrphans")
 }
 
 // -- Coverage gauge wiring tests --

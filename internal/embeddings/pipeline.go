@@ -445,7 +445,8 @@ func (p *Pipeline) checkSameSHAFastPath(ctx context.Context, repoKey, root, curr
 		// restart. The dry-run refreshes gocode_index_stale_path_ratio
 		// from the source_path recorded in code_repo_state and deletes
 		// NOTHING. The existing post-parse DELETING reconciliation stays
-		// where it is, still gated by the shrink guard (#710 invariant).
+		// where it is, no longer gated by the shrink guard (the path
+		// reconciliation's oracle is the filesystem, not the parse).
 		//
 		// #720: this call goes through the shared seam runFastPathDryRunReconcile,
 		// which is also called by IncrementalSync's same-SHA branch. The boot
@@ -663,13 +664,27 @@ func (p *Pipeline) indexRepoWithTool(
 
 	// Path-existence reconciliation (#708): delete rows under this repo_key
 	// whose file_path does not resolve under the repo root. Runs AFTER the
-	// parse so it is gated by the same shrink-guard as the orphan delete
-	// (shrinkGuardFires) — a partial parse must not trigger a stale-path
-	// mass-delete any more than an orphan-key mass-delete. The intra-key
-	// orphan reconciliation (deleteIntraKeyOrphans) only covers per-symbol
-	// cleanup; it cannot catch a file_path that belongs to a different
-	// project sharing the same repo_key (the FNV(path) rename collision at
-	// the heart of #708).
+	// parse but is NOT gated by the shrink-guard (shrinkGuardFires). The two
+	// delete paths have different oracles and different guards:
+	//
+	//   - deleteIntraKeyOrphans: oracle is the PARSE. A parser error yields a
+	//     small seen set, so a parse-ratio guard is load-bearing — it prevents
+	//     a partial parse from mass-deleting valid symbol rows. The shrink
+	//     guard stays here.
+	//
+	//   - ReconcileRepoPaths (this call): oracle is the FILESYSTEM. A
+	//     symbol-count ratio says nothing about whether a file exists on disk.
+	//     ReconcileRepoPaths carries its own data-loss guards (root_missing,
+	//     source_path_empty — see reconcile_paths_test.go) that are the right
+	//     safety mechanism for this path. Gating it on the shrink guard
+	//     created a ratchet: once orphans exceeded ~30% of the table,
+	//     seen < 0.7*existing became permanently true, the cleanup was
+	//     skipped, and the index could never self-heal.
+	//
+	// The intra-key orphan reconciliation (deleteIntraKeyOrphans) only covers
+	// per-symbol cleanup; it cannot catch a file_path that belongs to a
+	// different project sharing the same repo_key (the FNV(path) rename
+	// collision at the heart of #708).
 	//
 	// #714 round 2: the root is resolved from code_repo_state.source_path
 	// FIRST (the recorded root — preferring it over the argument is defensive
@@ -705,7 +720,7 @@ func (p *Pipeline) indexRepoWithTool(
 	// paths can have appeared. A full-walk index (SHA changed or non-git) is
 	// where renames surface. The fast-path DRY-RUN reconciliation
 	// (runFastPathDryRunReconcile, above) covers the gauge-refresh case.
-	if p.reconcilePaths != nil && !shrinkGuardFires(seen, existing) {
+	if p.reconcilePaths != nil {
 		sourcePath, spErr := p.store.GetRepoSourcePath(ctx, repoKey)
 		if spErr != nil {
 			slog.Warn("indexRepo: source_path lookup failed (non-fatal)",
@@ -885,11 +900,19 @@ func filterSymbols(
 
 // shrinkGuardFires returns true when the parsed symbol-key set is suspiciously
 // small relative to the existing DB-key set — a partial-parse signal that means
-// NO deletes (orphan symbol keys OR stale file_paths) should proceed. The 0.7
+// symbol-orphan deletion (deleteIntraKeyOrphans) should be skipped. The 0.7
 // threshold catches accidental partial-parse mass-delete without blocking
-// legitimate large deletions. Shared by deleteIntraKeyOrphans and the
-// path-existence reconciliation so both delete paths are gated by ONE mechanism
-// and ONE metric (#708 round 2 finding 0).
+// legitimate large deletions.
+//
+// This guard gates ONLY deleteIntraKeyOrphans, whose oracle is the parse: a
+// parser error on half the files yields a small seen set, so a parse-ratio
+// guard is load-bearing. The path-existence reconciliation (ReconcileRepoPaths)
+// is NOT gated by this function — its oracle is the filesystem, not the parse,
+// and it carries its own data-loss guards (root_missing, source_path_empty).
+// Unifying the two under one guard (the original #708 round 2 design) created
+// a ratchet: once orphans exceeded ~30% of the table, seen < 0.7*existing
+// became permanently true, the path cleanup was skipped, and the index could
+// never self-heal.
 func shrinkGuardFires(seen map[string]bool, existing map[string]uint64) bool {
 	return len(existing) > 0 && float64(len(seen)) < 0.7*float64(len(existing))
 }
@@ -918,8 +941,14 @@ func deleteIntraKeyOrphans(
 			slog.Int("seen", len(seen)),
 			slog.Int("existing", len(existing)))
 		orphanDeleteSkippedTotal.WithLabelValues("shrink_guard").Inc()
+		shrinkGuardConsecutiveSkips.WithLabelValues(repoKey).Inc()
 		return
 	}
+
+	// Guard did not fire — reset the consecutive-skip gauge. A non-skip
+	// outcome (successful delete, delete error, or no orphans) breaks the
+	// streak, so a rising gauge unambiguously means a stuck index.
+	shrinkGuardConsecutiveSkips.WithLabelValues(repoKey).Set(0)
 
 	orphansDeleted, orphanErr := store.DeleteExplicitOrphans(ctx, repoKey, orphanKeys)
 	if orphanErr != nil {

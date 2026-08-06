@@ -24,8 +24,8 @@ import (
 //
 // DB-gated: needs a real store to reach the post-parse hook.
 //
-// Falsifiable: remove the `if p.reconcilePaths != nil && !shrinkGuardFires`
-// block from indexRepoWithTool → reconcileCalls stays 0 → assert.Equal(1, ...) fails.
+// Falsifiable: remove the `if p.reconcilePaths != nil` block from
+// indexRepoWithTool → reconcileCalls stays 0 → assert.Equal(1, ...) fails.
 func TestIndexRepoWithTool_CallsReconcilePaths(t *testing.T) {
 	p, store := testPipeline(t)
 	ctx := context.Background()
@@ -79,43 +79,61 @@ func TestIndexRepoWithTool_NilReconcilePathsNoPanic(t *testing.T) {
 	require.NoError(t, err, "nil reconcilePaths must not cause an index failure")
 }
 
-// TestIndexRepoWithTool_ReconcileSkippedOnShrinkGuard verifies that when the
-// shrink-guard fires (seen < 70% of existing), the path-existence
-// reconciliation is SKIPPED — it does not delete the legacy rows the
-// shrink-guard exists to protect (#708 round 2 finding 0).
+// TestIndexRepoWithTool_ReconcileDeletesStalePathDespiteShrinkGuard is F1:
+// a stale file_path IS deleted even when the shrink guard would fire.
 //
-// This is the anti-vacuity guard for the shrink-gate on the reconciliation:
-// remove the `!shrinkGuardFires(seen, existing)` condition from the
-// reconciliation call in indexRepoWithTool and the hook deletes all legacy
-// rows before deleteIntraKeyOrphans can fire the guard → this test goes RED
-// (reconcileDeleteCalls > 0, legacy rows gone).
+// The shrink guard (shrinkGuardFires) gates deleteIntraKeyOrphans, whose
+// oracle is the PARSE — a partial parse yields a small seen set, so a
+// parse-based guard is load-bearing there. The path-existence reconciliation
+// has a different oracle: the FILESYSTEM. A symbol-count ratio says nothing
+// about whether a file exists on disk. ReconcileRepoPaths carries its own
+// data-loss guards (root_missing, source_path_empty — see F3). Un-gating it
+// from the shrink guard breaks the ratchet where orphans exceed 30% of the
+// table, seen < 0.7*existing becomes permanently true, and the index can
+// never self-heal.
+//
+// Setup: seed 600 rows under a file_path that does NOT exist on disk, then
+// index with only 16 symbols (16/600 < 0.7 → shrink guard fires). The
+// reconcile hook (un-gated) must still delete the stale-path rows.
+// deleteIntraKeyOrphans is skipped by the shrink guard, so the ONLY path
+// that can delete the stale rows is the reconcile hook — this is the
+// anti-vacuity guarantee.
+//
+// F1 — a stale path IS now deleted even when the shrink guard would fire.
+// Mutation: restore `!shrinkGuardFires(seen, existing)` on the reconcile
+// call in pipeline.go → reconcile hook skipped → stale rows survive →
+// assert.Len(staleRows, 0) goes RED.
 //
 // DB-gated: needs a real store to run a full IndexRepo.
-func TestIndexRepoWithTool_ReconcileSkippedOnShrinkGuard(t *testing.T) {
+func TestIndexRepoWithTool_ReconcileDeletesStalePathDespiteShrinkGuard(t *testing.T) {
 	p, store := testPipeline(t)
 	ctx := context.Background()
-	const repo = "test/reconcile-shrink-guard"
-	cleanRepo(t, store, repo)
+	const repo = "test/reconcile-stale-despite-shrink-guard"
+	cleanRepoFull(t, store, repo)
 
-	// Seed 600 rows directly (simulating a prior full index).
+	// Seed 600 rows under a file_path that does NOT exist on disk.
 	const total = 600
 	names := make([]string, total)
 	for i := range names {
 		names[i] = fmt.Sprintf("Sym_%04d", i)
 	}
-	insertSymbols(t, store, repo, "legacy_file.go", names)
+	insertSymbols(t, store, repo, "stale/deleted_file.go", names)
 
-	// Index against a fresh source with only ~16 symbols (16/600 < 0.7 → guard fires).
+	// Seed a state row with source_path=dir so the reconcile hook resolves
+	// the root from state (not the root fallback).
 	dir := t.TempDir()
+	require.NoError(t, store.SetRepoStateWithPath(ctx, repo, "prior-sha-not-matching", "test-model", dir))
+
+	// Index with only 16 symbols (16/600 < 0.7 → shrink guard fires).
 	smallNames := make([]string, 16)
 	for i := range smallNames {
 		smallNames[i] = fmt.Sprintf("NewFunc%02d", i)
 	}
 	writeTempGoFile(t, dir, "main.go", smallNames)
 
-	var reconcileDeleteCalls int32
+	var reconcileCalls int32
 	p.reconcilePaths = func(ctx context.Context, repoKey, sourcePath string, dryRun bool) (*ReconcileResult, error) {
-		atomic.AddInt32(&reconcileDeleteCalls, 1)
+		atomic.AddInt32(&reconcileCalls, 1)
 		// Delegate to the real store to actually attempt the delete.
 		return store.ReconcileRepoPaths(ctx, repoKey, sourcePath, dryRun)
 	}
@@ -123,16 +141,82 @@ func TestIndexRepoWithTool_ReconcileSkippedOnShrinkGuard(t *testing.T) {
 	_, err := p.IndexRepo(ctx, repo, dir)
 	require.NoError(t, err)
 
-	// The reconciliation hook must NOT have been called (shrink guard skipped it).
-	assert.Equal(t, int32(0), atomic.LoadInt32(&reconcileDeleteCalls),
-		"reconcilePaths must be skipped when shrinkGuardFires — "+
-			"if this is 1, the shrink-guard gate was removed from the reconciliation call")
+	// The reconciliation hook MUST have been called (un-gated from shrink guard).
+	assert.Equal(t, int32(1), atomic.LoadInt32(&reconcileCalls),
+		"reconcilePaths must be called even when shrinkGuardFires — "+
+			"if this is 0, the shrink-guard gate was restored on the reconciliation call")
 
-	// Legacy rows must survive.
-	legacyRows, err := store.GetSymbolsForFile(ctx, repo, "legacy_file.go")
+	// Stale-path rows MUST be deleted by the reconcile hook.
+	staleRows, err := store.GetSymbolsForFile(ctx, repo, "stale/deleted_file.go")
 	require.NoError(t, err)
-	assert.Len(t, legacyRows, total,
-		"all 600 legacy rows must survive when shrink-guard fires (reconciliation + orphan-delete both skipped)")
+	assert.Len(t, staleRows, 0,
+		"stale-path rows MUST be deleted by the reconcile hook even when the shrink guard fires — "+
+			"if 600, the reconcile hook was skipped (shrink-guard gate restored) "+
+			"and the ratchet persists")
+}
+
+// TestIndexRepoWithTool_ReconcileRootMissingStillDeletesNothing is F3: the
+// existing data-loss guards inside ReconcileRepoPaths still hold now that the
+// outer shrink-guard gate is gone. When the state's source_path points to a
+// non-existent directory, the reconcile hook must skip with root_missing and
+// delete nothing — a mount blip or transient NFS hang must not wipe a good
+// index.
+//
+// The shrink guard is deliberately NOT fired here (seen ≈ existing) so the
+// reconcile hook definitely runs — this proves the inner guard holds on its
+// own, without the outer gate as a backstop.
+//
+// F3 — root_missing and source_path_empty must still delete nothing, now
+// that the outer gate is gone.
+// Mutation: remove the os.Stat(root) guard in CheckStalePaths
+// (reconcile_paths.go:247-250 — delete the `info, err := os.Stat(root);
+// if err != nil || !info.IsDir() { return nil, 0, false }` block and always
+// proceed to the per-file loop) → every file appears stale under the
+// missing root → res.Deleted > 0 → assert.Equal(int64(0), res.Deleted)
+// goes RED.
+//
+// DB-gated: needs a real store to run a full IndexRepo.
+func TestIndexRepoWithTool_ReconcileRootMissingStillDeletesNothing(t *testing.T) {
+	p, store := testPipeline(t)
+	ctx := context.Background()
+	const repo = "test/reconcile-root-missing-pipeline"
+	cleanRepoFull(t, store, repo)
+
+	// Seed 3 rows under a file that does NOT exist on disk.
+	insertSymbols(t, store, repo, "stale/missing.go", []string{"StaleA", "StaleB", "StaleC"})
+
+	// Seed a state row with source_path pointing to a NON-EXISTENT dir.
+	// The reconcile hook resolves the root from state → gets the bad path →
+	// ReconcileRepoPaths checks os.Stat → fails → skips with root_missing.
+	require.NoError(t, store.SetRepoStateWithPath(ctx, repo, "deadbeef", "test-model", "/nonexistent/path/does/not/exist"))
+
+	// Index with 3 symbols so the shrink guard does NOT fire (3/3 >= 0.7*3).
+	// This ensures the reconcile hook runs and the root_missing guard is
+	// exercised, not masked by the outer gate.
+	dir := t.TempDir()
+	writeTempGoFile(t, dir, "main.go", []string{"RealFunc1", "RealFunc2", "RealFunc3"})
+
+	var reconcileRes atomic.Value
+	p.reconcilePaths = func(ctx context.Context, repoKey, sourcePath string, dryRun bool) (*ReconcileResult, error) {
+		res, err := store.ReconcileRepoPaths(ctx, repoKey, sourcePath, dryRun)
+		if res != nil {
+			reconcileRes.Store(res)
+		}
+		return res, err
+	}
+
+	_, err := p.IndexRepo(ctx, repo, dir)
+	require.NoError(t, err)
+
+	// The reconcile hook MUST have been called (outer gate is gone).
+	res, ok := reconcileRes.Load().(*ReconcileResult)
+	require.True(t, ok, "reconcilePaths must have been called and stored a result")
+	assert.True(t, res.Skipped, "reconcile must skip when root is missing")
+	assert.Equal(t, "root_missing", res.SkipReason,
+		"skip reason must be root_missing when source_path does not exist on disk")
+	assert.Equal(t, int64(0), res.Deleted,
+		"root_missing guard must delete nothing — if >0, the os.Stat guard in "+
+			"CheckStalePaths was removed and a mount blip can wipe a good index")
 }
 
 // -- #714 round 2: three-way root resolution + self-heal backfill --
