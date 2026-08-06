@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.63.1](https://github.com/anatolykoptev/go-code/compare/v1.63.0...v1.63.1) (2026-08-06)
+
+
+### Fixed
+
+* **index:** un-gate path reconciliation from the shrink guard ([#769](https://github.com/anatolykoptev/go-code/issues/769)) ([3525754](https://github.com/anatolykoptev/go-code/commit/35257540bf0498b9af5f79380993f29fc571e73c))
+
 ## [1.63.0](https://github.com/anatolykoptev/vaelor/compare/v1.62.1...v1.63.0) (2026-08-05)
 
 
