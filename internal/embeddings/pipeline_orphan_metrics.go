@@ -46,13 +46,40 @@ func SetOrphanRepoKeysGauge(n float64) { orphanRepoKeysGauge.Set(n) }
 // gocode_index_orphan_delete_skipped_total counts times the intra-key orphan
 // delete was skipped by the shrink-guard (seen < 70% of existing rows). A non-zero
 // rate indicates a partial parse was detected and mass-deletion was avoided.
-// reason="shrink_guard" is the only label value today.
+// reason="shrink_guard" fires on a partial-parse skip; reason="error" fires on
+// a delete error.
 var orphanDeleteSkippedTotal = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "gocode_index_orphan_delete_skipped_total",
 		Help: "Times the intra-key orphan delete was skipped (e.g. shrink_guard: seen < 70%% of existing).",
 	},
 	[]string{"reason"},
+)
+
+// gocode_index_shrink_guard_consecutive_skips is a per-repo gauge recording
+// how many CONSECUTIVE times the shrink-guard has fired for a repo's
+// deleteIntraKeyOrphans call. It increments on each skip and resets to 0 on
+// any non-skip outcome (successful delete, delete error, or no orphans).
+//
+// A perpetually-rising gauge means a stuck index — the ratchet state where
+// orphans exceed ~30% of the table, seen < 0.7*existing is permanently true,
+// and the guard fires every run without the index ever self-healing. The
+// companion orphanDeleteSkippedTotal counter records total skips but cannot
+// distinguish "skipped 3 times in a row" from "skipped 3 times over 100 runs"
+// — this gauge closes that gap.
+//
+// This mirrors the consecFails pattern from go-kit's CircuitBreaker
+// (consecutive-failure counter that resets on success) but as a simple per-repo
+// gauge — the existing idiom in this package (stalePathRatioGauge,
+// embeddingsCoverageRows).
+//
+// Cardinality: 1 label (repo) — bounded by indexed repo count (~100).
+var shrinkGuardConsecutiveSkips = promauto.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "gocode_index_shrink_guard_consecutive_skips",
+		Help: "Consecutive shrink-guard skips per repo (deleteIntraKeyOrphans). A rising gauge = stuck index; 0 = healthy or just-recovered.",
+	},
+	[]string{"repo"},
 )
 
 // gocode_index_embeddings_coverage_rows is a gauge set after each full indexRepo
