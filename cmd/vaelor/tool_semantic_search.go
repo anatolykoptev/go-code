@@ -640,9 +640,7 @@ func finalResult(
 	reranked = annotateWithPageRank(reranked, prSignals)
 	hint := mcpmeta.HintAfterCodeSearch(input.Query, len(reranked), symbolNameFromResults(reranked))
 	env := mcpmeta.Wrap(time.Since(t0), hint)
-	if sha := deps.AnalyzeDeps.IndexedSHA(ctx, repoKey); sha != "" {
-		env = mcpmeta.WithFreshness(env, root, sha)
-	}
+	env = annotateEnv(env, input.Repo, root, deps.AnalyzeDeps.IndexedSHA(ctx, repoKey))
 	// #691: degradation marker — when the retrieval path fused a stale AGE
 	// graph, carry the graph age on the response envelope so a caller can
 	// tell it received degraded ranking. Zero (omitted via omitempty) when

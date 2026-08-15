@@ -167,9 +167,7 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 	}
 	hint := mcpmeta.HintAfterCodeSearch(query, len(matches), firstSym)
 	env := mcpmeta.Wrap(time.Since(t0), hint)
-	if sha := deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)); sha != "" {
-		env = mcpmeta.WithFreshness(env, root, sha)
-	}
+	env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
 	// Progressive result-shortening ladder (#685): try the full result with
 	// context, then matches without context, then a per-file count summary.
 	// renderLadder owns the five invariants (reserve, file-save gate, ceiling,

@@ -58,7 +58,7 @@ func textResult(text string) *mcp.CallToolResult {
 // metaResult / metaXMLMarshalResult / metaLargeTextResult previously
 // duplicated.
 func appendMetaFooter(body string, env mcpmeta.Envelope) string {
-	if env.Hint == "" && env.StaleWarning == "" && env.GraphStaleAgeS == 0 {
+	if !env.HasSignal() {
 		return body
 	}
 	js, err := json.Marshal(env)
@@ -98,7 +98,7 @@ func metaXMLMarshalResult(v any, toolName, outputDir string, env mcpmeta.Envelop
 func metaLargeTextResult(text, toolName, outputDir string, env mcpmeta.Envelope) *mcp.CallToolResult {
 	// Short-circuit: avoid the Content[0] cast dance for the common no-signal path
 	// (no hint, no staleness warning — a bare duration_ms never gets a footer).
-	if env.Hint == "" && env.StaleWarning == "" {
+	if !env.HasSignal() {
 		return largeTextResult(text, toolName, outputDir)
 	}
 	res := largeTextResult(text, toolName, outputDir)
@@ -275,4 +275,25 @@ func applyPolicy(_ context.Context, root string, r *review.DeltaResult) []policy
 		}
 		return string(b)
 	})
+}
+
+// annotateEnv attaches every provenance signal a local-path answer needs, so a
+// tool cannot ship with only some of them wired.
+//
+// Three independent questions, all of which must be clean before an answer is
+// current, and none of which implies the others:
+//
+//   - WithFreshness: has the INDEX kept up with the CHECKOUT?
+//   - WithCheckoutLag: has the CHECKOUT kept up with ORIGIN?
+//   - WithSourcePath: was the repo named by a path that is not where it lives?
+//
+// Each stays silent when it has nothing to report, so the common case adds no
+// footer at all. indexedSHA may be empty — freshness is then simply unknown
+// and skipped, which is not the same as fresh.
+func annotateEnv(env mcpmeta.Envelope, requestedRepo, root, indexedSHA string) mcpmeta.Envelope {
+	if indexedSHA != "" {
+		env = mcpmeta.WithFreshness(env, root, indexedSHA)
+	}
+	env = mcpmeta.WithSourcePath(env, requestedRepo, root)
+	return mcpmeta.WithCheckoutLag(env, root)
 }

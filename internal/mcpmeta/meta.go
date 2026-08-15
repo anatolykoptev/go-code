@@ -38,6 +38,18 @@ type Envelope struct {
 	StaleWarning string `json:"stale_warning,omitempty"`
 	IndexedSHA   string `json:"indexed_sha,omitempty"`
 	LiveSHA      string `json:"live_sha,omitempty"`
+	// SourcePath is the server-side repository root the answer was computed
+	// from. Populated only when the caller named the repo by a different path
+	// (a PATH_MAPPINGS alias), because that is the only case where a reader
+	// could mistake the answer for one about their own working tree.
+	// See WithSourcePath.
+	SourcePath string `json:"source_path,omitempty"`
+	// CheckoutLag reports that the server-side checkout's main branch differs
+	// from its origin/main remote-tracking ref — the indexed tree is not the
+	// forge's current tip. Empty when they match. This is a different axis
+	// from StaleWarning, which compares the INDEX against the CHECKOUT.
+	// See WithCheckoutLag.
+	CheckoutLag string `json:"checkout_lag,omitempty"`
 	// GraphStaleAgeS is the age (seconds) of the AGE graph when the retrieval
 	// path fused a stale graph into the search results. Zero (omitted) when
 	// the graph is fresh — the fresh path is byte-identical to pre-#691
@@ -58,4 +70,22 @@ func Wrap(elapsed time.Duration, hint string) Envelope {
 		DurationMS: ms,
 		Hint:       hint,
 	}
+}
+
+// HasSignal reports whether the envelope carries anything the caller can act
+// on. The response-footer renderers use this as their single gate so they
+// cannot drift apart: before it existed appendMetaFooter counted
+// GraphStaleAgeS as signal and metaLargeTextResult did not, so a
+// graph-staleness-only envelope rendered a footer on a small response and
+// silently lost it on a large one.
+//
+// DurationMS is deliberately excluded — a bare duration is telemetry the
+// calling agent cannot act on, and counting it would put a footer on every
+// single response, which is the noise the silence contract exists to prevent.
+func (e Envelope) HasSignal() bool {
+	return e.Hint != "" ||
+		e.StaleWarning != "" ||
+		e.SourcePath != "" ||
+		e.CheckoutLag != "" ||
+		e.GraphStaleAgeS != 0
 }
