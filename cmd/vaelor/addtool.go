@@ -130,7 +130,12 @@ func applyBudgetAndTook(res *mcp.CallToolResult, elapsed time.Duration, requeste
 	// CWD at cmd/vaelor/, where no .git exists — so it is pinned explicitly by
 	// TestApplyBudgetAndTook_NoRepoResolved_DoesNotReportProcessCWD.
 	if resolved != "" && !mcpmeta.HasMetaFooter(text) {
-		env := mcpmeta.Envelope{}
+		// Wrap, not a bare Envelope: DurationMS has no omitempty (it is
+		// deliberately always serialized), so a bare envelope publishes
+		// "duration_ms":0 on every centrally-attached footer — a measured-
+		// looking zero in a record read for provenance. The wrapper already
+		// timed the handler; use that number.
+		env := mcpmeta.Wrap(elapsed, "")
 		env = mcpmeta.WithSourcePath(env, requested, resolved)
 		env = mcpmeta.WithCheckoutLag(env, resolved)
 		text = appendMetaFooter(text, env)
