@@ -46,12 +46,25 @@ const tookFooterPrefix = "\ntook_ms="
 // shaping) must not get a second one.
 const metaFooterPrefix = "<!-- meta:"
 
-// HasMetaFooter reports whether text already carries a provenance envelope
-// footer (<!-- meta: ... -->). Used by the central attachment in
-// applyBudgetAndTook to skip double-appending when a tool already attached
-// one that survived budget shaping.
+// HasMetaFooter reports whether text ENDS with a provenance envelope footer
+// (<!-- meta: {...} -->). Used by the central attachment in applyBudgetAndTook
+// to skip double-appending when a tool already attached one that survived
+// budget shaping.
+//
+// Anchored to the last line rather than a substring search, unlike the sibling
+// HasTookFooter: a response BODY can legitimately contain the sentinel — a
+// code search over vaelor's own source returns the very line that builds this
+// footer — and a Contains check reads that as "already attached", silently
+// dropping the real footer from exactly the query most likely to be run
+// against this repo.
+//
+// The last line is a sound anchor because the footer is the final thing
+// appended before took_ms, and truncation only ever cuts before the end:
+// Shape leaves the footer whole or removes it outright, never a fragment at
+// the tail. A text with no newline is treated as a single line.
 func HasMetaFooter(text string) bool {
-	return strings.Contains(text, metaFooterPrefix)
+	last := text[strings.LastIndex(text, "\n")+1:]
+	return strings.HasPrefix(last, metaFooterPrefix) && strings.HasSuffix(last, "-->")
 }
 
 // Shape applies a response budget to text. When the text fits within budget

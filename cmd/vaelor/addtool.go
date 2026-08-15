@@ -120,7 +120,16 @@ func applyBudgetAndTook(res *mcp.CallToolResult, elapsed time.Duration, requeste
 	// footer (via annotateEnv) and it survived shaping, skip. On a large
 	// response the per-tool footer is truncated away by Shape, so this step
 	// sees none and restores it — which is the fix.
-	if !mcpmeta.HasMetaFooter(text) {
+	//
+	// resolved == "" means no repo was resolved (a non-repo tool, or a handler
+	// that never reached resolveRoot) and MUST short-circuit: gitDir joins its
+	// argument with ".git", so WithCheckoutLag("") stats ".git" relative to the
+	// PROCESS working directory. A binary started from inside a checkout would
+	// then report that checkout's lag on responses that touched no repo at all.
+	// The suite cannot see this by accident — `go test ./cmd/vaelor/` runs with
+	// CWD at cmd/vaelor/, where no .git exists — so it is pinned explicitly by
+	// TestApplyBudgetAndTook_NoRepoResolved_DoesNotReportProcessCWD.
+	if resolved != "" && !mcpmeta.HasMetaFooter(text) {
 		env := mcpmeta.Envelope{}
 		env = mcpmeta.WithSourcePath(env, requested, resolved)
 		env = mcpmeta.WithCheckoutLag(env, resolved)
