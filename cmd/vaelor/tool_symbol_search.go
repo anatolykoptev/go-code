@@ -132,6 +132,7 @@ func registerSymbolSearch(server *mcp.Server, cfg Config, deps analyze.Deps, sem
 			hint := indexedPathsHint()
 			if suggestions := semanticSuggest(ctx, sem, root, input.Query, input.Language); suggestions != "" {
 				env := mcpmeta.Wrap(time.Since(t0), "")
+				env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
 				body := formatSymbolSearchNoMatch(input.Query, suggestions) + "\n\n" + hint
 				return metaResult(body, env), nil
 			}

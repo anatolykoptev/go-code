@@ -139,6 +139,7 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 			return errResult(fmt.Sprintf("search: %s", err)), nil
 		}
 		env := mcpmeta.Wrap(time.Since(t0), "")
+		env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
 		return metaXMLMarshalResult(formatExpandedSearchXML(input, oxMatches), "code_search", outputDir, env), nil
 	}
 
@@ -151,6 +152,7 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 	if len(matches) == 0 {
 		if suggestions := semanticSuggest(ctx, sem, root, input.Pattern, input.Language); suggestions != "" {
 			env := mcpmeta.Wrap(time.Since(t0), "")
+			env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
 			return metaResult(formatCodeSearchNoMatch(input.Pattern, suggestions), env), nil
 		}
 	}

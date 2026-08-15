@@ -49,10 +49,11 @@ func textResult(text string) *mcp.CallToolResult {
 	}
 }
 
-// appendMetaFooter returns `body` with an `<!-- meta: <json> -->` footer
-// only when `env` carries a hint or a staleness warning — a bare duration_ms
-// is pure telemetry with zero analytic value to the consumer, so it is
-// suppressed to cut response token footprint. Returns body unchanged otherwise.
+// appendMetaFooter returns `body` with an `<!-- meta: <json> -->` footer only
+// when `env` carries something actionable (see mcpmeta.Envelope.HasSignal) — a
+// bare duration_ms is pure telemetry with zero analytic value to the consumer,
+// so it is suppressed to cut response token footprint. Returns body unchanged
+// otherwise.
 //
 // Centralises the empty-envelope check + marshal-error fallback that
 // metaResult / metaXMLMarshalResult / metaLargeTextResult previously
@@ -68,13 +69,13 @@ func appendMetaFooter(body string, env mcpmeta.Envelope) string {
 	return body + "\n\n<!-- meta: " + string(js) + " -->"
 }
 
-// metaResult returns a text CallToolResult and, when env carries a hint or
-// staleness warning, appends a JSON-encoded "_meta" footer separated by a
-// sentinel marker (HTML comment) so existing human readers and
-// string-matching tests continue to work unchanged.
+// metaResult returns a text CallToolResult and, when env carries a signal,
+// appends a JSON-encoded "_meta" footer separated by a sentinel marker (HTML
+// comment) so existing human readers and string-matching tests continue to work
+// unchanged.
 //
-// An envelope with no hint and no staleness warning falls back to plain
-// textResult — a bare duration_ms alone never triggers the footer.
+// An envelope with nothing actionable falls back to plain textResult — a bare
+// duration_ms alone never triggers the footer.
 func metaResult(text string, env mcpmeta.Envelope) *mcp.CallToolResult {
 	return textResult(appendMetaFooter(text, env))
 }
@@ -96,8 +97,8 @@ func metaXMLMarshalResult(v any, toolName, outputDir string, env mcpmeta.Envelop
 // agent always sees the hint and timing regardless of whether the body is
 // inline or file-backed.
 func metaLargeTextResult(text, toolName, outputDir string, env mcpmeta.Envelope) *mcp.CallToolResult {
-	// Short-circuit: avoid the Content[0] cast dance for the common no-signal path
-	// (no hint, no staleness warning — a bare duration_ms never gets a footer).
+	// Short-circuit: avoid the Content[0] cast dance for the common no-signal
+	// path (a bare duration_ms never gets a footer).
 	if !env.HasSignal() {
 		return largeTextResult(text, toolName, outputDir)
 	}

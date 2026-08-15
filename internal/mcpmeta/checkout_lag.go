@@ -8,50 +8,65 @@ import (
 	"strings"
 )
 
-// OriginMainSHA returns the SHA of the repo's origin/main remote-tracking ref
-// (refs/remotes/origin/main, then .../master), without spawning git and
-// without touching the network.
+// refSHA reads one fully-qualified ref (e.g. "refs/remotes/origin/main") from a
+// repo's common dir, loose file first and packed-refs second. Returns "" when
+// the ref does not exist or does not hold a 40-hex SHA.
 //
-// The remote-tracking ref is an ordinary local file that `git fetch` maintains;
-// on this fleet an hourly ff-only sync unit refreshes it. Reading it answers
-// "where was origin when we last fetched", which is exactly what a staleness
-// report needs. Fetching here instead would be both impossible and wrong: the
-// source tree is mounted read-only, and a write to .git on every tool call
-// would race the host's syncer.
+// Remote-tracking refs are packed on most real checkouts, so the packed
+// fallback is the common path rather than the exotic one.
+func refSHA(commonDir, ref string) string {
+	loose := filepath.Join(commonDir, filepath.FromSlash(ref))
+	if data, err := os.ReadFile(loose); err == nil { //nolint:gosec
+		sha := strings.TrimSpace(string(data))
+		if len(sha) == 40 && isHex(sha) {
+			return sha
+		}
+	}
+	return packedRefSHA(commonDir, ref)
+}
+
+// mainBranchRefs resolves the repo's main branch ONCE and returns its name
+// alongside the local tip and the tip of that SAME branch on origin.
 //
-// Returns ("", nil) when the repo has no origin remote — a checkout that was
-// never cloned from anywhere is not "behind", it simply has no upstream.
-// Returns ("", err) only when repoRoot is not a git repository at all.
-func OriginMainSHA(repoRoot string) (string, error) {
+// Resolving the name once is the whole point. Reading "the local main branch"
+// and "the origin main branch" through two independent main-then-master
+// searches lets them land on DIFFERENT branches: a repo migrated master → main
+// that still carries a stale refs/remotes/origin/master would match local
+// `main` and remote `master`, and comparing those two unrelated histories
+// produces a confident, wrong staleness claim — the exact failure this whole
+// signal exists to prevent.
+//
+// The local branch is what defines the pair: a branch with no local ref is not
+// this repo's main branch no matter what origin carries. Returns ("", "", "",
+// nil) when neither main nor master exists locally — unidentifiable, so callers
+// stay silent. origin is "" when the repo has no matching remote-tracking ref,
+// which means "no upstream", not "behind".
+//
+// Reads files only: no git subprocess, no network, no write. The remote ref is
+// whatever the last fetch left on disk, which is precisely the question a
+// staleness report asks.
+func mainBranchRefs(repoRoot string) (branch, local, origin string, err error) {
 	gd, err := gitDir(repoRoot)
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
 	cd := commonDir(gd)
-	for _, branch := range []string{"main", "master"} {
-		ref := "refs/remotes/origin/" + branch
-		// Loose ref first.
-		loose := filepath.Join(cd, filepath.FromSlash(ref))
-		if data, err := os.ReadFile(loose); err == nil { //nolint:gosec
-			sha := strings.TrimSpace(string(data))
-			if len(sha) == 40 && isHex(sha) {
-				return sha, nil
-			}
+	for _, b := range []string{"main", "master"} {
+		localSHA := refSHA(cd, "refs/heads/"+b)
+		if localSHA == "" {
+			continue
 		}
-		// packed-refs fallback — remote-tracking refs are commonly packed.
-		if sha := packedRefSHA(cd, ref); sha != "" {
-			return sha, nil
-		}
+		return b, localSHA, refSHA(cd, "refs/remotes/origin/"+b), nil
 	}
-	return "", nil
+	return "", "", "", nil
 }
 
 // WithCheckoutLag annotates an envelope when the server-side checkout's main
-// branch differs from its origin/main remote-tracking ref — that is, when the
-// tree vaelor indexed is not what the forge currently holds.
+// branch differs from the same branch on origin — that is, when the tree
+// vaelor indexed is not what the forge currently holds.
 //
-// This is a DIFFERENT axis from WithFreshness, and both must be green before
-// an answer is current:
+// This is a DIFFERENT axis from WithFreshness, and both must be clean before an
+// answer is current:
 //
 //   - WithFreshness asks "has the INDEX kept up with the CHECKOUT?"
 //   - WithCheckoutLag asks "has the CHECKOUT kept up with ORIGIN?"
@@ -60,25 +75,20 @@ func OriginMainSHA(repoRoot string) (string, error) {
 // fresh by the first question and badly stale by the second, which is the gap
 // this closes.
 //
-// It reports only. Updating the checkout belongs to the host's ff-only sync
-// unit, which holds a safety contract (never switches branch, skips dirty
-// trees, respects worktrees and index.lock) that a per-call `git pull` from
-// inside the container would not — and could not, the mount being read-only.
+// It reports; it never updates. Pulling belongs to whatever syncs the checkout,
+// which can hold safety properties (never switching branch, skipping dirty
+// trees, respecting worktrees and index.lock) that a per-call `git pull` from a
+// read-only mount could not.
 //
-// Silent when the refs match, when either is unavailable, or when the repo has
-// no origin remote.
+// Silent when the two tips match, when either is unavailable, or when the repo
+// has no origin remote. Note this reads the main-branch refs a second time
+// after WithFreshness already read them; the duplicate cost is a few file
+// stats, and sharing the read would couple two checks that are deliberately
+// independent.
 func WithCheckoutLag(env Envelope, repoRoot string) Envelope {
-	local, err := MainBranchHeadSHA(repoRoot)
+	branch, local, origin, err := mainBranchRefs(repoRoot)
 	if err != nil {
-		slog.Debug("mcpmeta.MainBranchHeadSHA failed",
-			"repo_root", repoRoot,
-			"err", err,
-		)
-		return env
-	}
-	origin, err := OriginMainSHA(repoRoot)
-	if err != nil {
-		slog.Debug("mcpmeta.OriginMainSHA failed",
+		slog.Debug("mcpmeta.mainBranchRefs failed",
 			"repo_root", repoRoot,
 			"err", err,
 		)
@@ -88,8 +98,10 @@ func WithCheckoutLag(env Envelope, repoRoot string) Envelope {
 		return env
 	}
 	env.CheckoutLag = fmt.Sprintf(
-		"server checkout main is %s, origin/main is %s -- the indexed tree is not the forge's current tip; the host ff-syncs hourly",
-		short(local), short(origin),
+		"server checkout %s is %s, origin/%s is %s -- the indexed tree is not the forge's current tip",
+		branch, short(local), branch, short(origin),
 	)
+	env.CheckoutSHA = local
+	env.OriginSHA = origin
 	return env
 }
