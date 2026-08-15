@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.64.1](https://github.com/anatolykoptev/vaelor/compare/v1.64.0...v1.64.1) (2026-08-15)
+
+
+### Fixed
+
+* **mcpmeta:** attach provenance centrally after shaping, not per tool ([#774](https://github.com/anatolykoptev/vaelor/issues/774)) ([622afc1](https://github.com/anatolykoptev/vaelor/commit/622afc16031851aa236840096be467507a4c46a5))
+
 ## [1.64.0](https://github.com/anatolykoptev/vaelor/compare/v1.63.1...v1.64.0) (2026-08-15)
 
 
