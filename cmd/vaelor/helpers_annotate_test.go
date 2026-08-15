@@ -14,6 +14,14 @@ import (
 func mkLaggingRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	writeLaggingGitDir(t, dir)
+	return dir
+}
+
+// writeLaggingGitDir plants the lagging plumbing into an EXISTING directory so
+// a caller can put real source files beside it.
+func writeLaggingGitDir(t *testing.T, dir string) {
+	t.Helper()
 	gitDir := filepath.Join(dir, ".git")
 	for _, sub := range []string{
 		filepath.Join("refs", "heads"),
@@ -32,7 +40,6 @@ func mkLaggingRepo(t *testing.T) string {
 	write("HEAD", "ref: refs/heads/main\n")
 	write(filepath.Join("refs", "heads", "main"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 	write(filepath.Join("refs", "remotes", "origin", "main"), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n")
-	return dir
 }
 
 // The unit tests prove each annotation works in isolation; this proves the
