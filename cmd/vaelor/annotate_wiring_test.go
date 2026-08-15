@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anatolykoptev/go-kit/embed"
 	"github.com/anatolykoptev/vaelor/internal/analyze"
 	"github.com/anatolykoptev/vaelor/internal/callgraph"
+	"github.com/anatolykoptev/vaelor/internal/embeddings"
 	"github.com/anatolykoptev/vaelor/internal/mcpmeta"
 	"github.com/anatolykoptev/vaelor/internal/parser"
 )
@@ -40,12 +42,21 @@ func mkLaggingSourceRepo(t *testing.T) string {
 // goes RED and the others stay GREEN. A row that still passes after its call is
 // removed is a non-test and must be rewritten.
 //
-// Not covered here, and deliberately so — each needs a live dependency this
-// suite has no cheap stub for: the code_search expand path (needs an OxCodes
-// client), the code_search and symbol_search semantic-fallback paths (need a
-// SemanticDeps that returns suggestions), symbol_search's main path (its
-// handler is a closure inside registerSymbolSearch, reachable only through a
-// running MCP server), and semantic_search (needs an embedding backend).
+// Three call sites remain uncovered, and the reason is structural rather than
+// a missing stub — an earlier revision of this doc claimed otherwise and a
+// review disproved it by driving two of the paths with seams that were already
+// sitting in this package:
+//
+//   - symbol_search, BOTH its main and semantic-fallback paths: the handler
+//     logic lives in a closure inside registerSymbolSearch capturing deps, sem
+//     and outputDir, with no extracted handleSymbolSearch to call. Reaching it
+//     needs a running MCP server or that extraction — a refactor, not a stub.
+//   - code_search's expand path: needs deps.OxCodes, so an httptest.Server
+//     answering the ox-codes search endpoint. Feasible (the dataflow tests
+//     already mock that server) but more scaffolding than the rest.
+//
+// If you add a row, prove it: delete that site's annotateEnv call and confirm
+// your row is the one that reddens.
 func TestProvenance_AllTools_SurfaceCheckoutLag(t *testing.T) {
 	const target = "Foo"
 
@@ -74,6 +85,53 @@ func TestProvenance_AllTools_SurfaceCheckoutLag(t *testing.T) {
 				}, analyze.Deps{}, &SemanticDeps{}, "")
 				if err != nil {
 					t.Fatalf("handleCodeSearchInner: %v", err)
+				}
+				return textContentOf(t, res)
+			},
+		},
+		{
+			// The semantic fallback is a separate early return from the main
+			// path above, with its own annotateEnv call: a pattern grep cannot
+			// find, plus a store spy so the suggestion branch is entered.
+			name: "code_search semantic-fallback",
+			run: func(t *testing.T) string {
+				root := mkLaggingSourceRepo(t)
+				sem := &SemanticDeps{storeSearcher: &searchByNameSpy{
+					results: []embeddings.SearchResult{
+						{SymbolName: "marked", FilePath: "a.go", SymbolKind: "func", StartLine: 4, Distance: 0.3},
+					},
+				}}
+				res, err := handleCodeSearchInner(context.Background(), CodeSearchInput{
+					Repo:       root,
+					Pattern:    "NO_SUCH_TOKEN_IN_THIS_REPO",
+					MaxResults: 10,
+				}, analyze.Deps{}, sem, "")
+				if err != nil {
+					t.Fatalf("handleCodeSearchInner: %v", err)
+				}
+				return textContentOf(t, res)
+			},
+		},
+		{
+			// Driven through the same seams the stale-space tests use, so no
+			// embed server or Postgres pool is involved. staleModelChecker and
+			// pipelineInvalidatorSeam stay nil so the stale-hit guard does not
+			// intercept before the result path that annotates.
+			name: "semantic_search",
+			run: func(t *testing.T) string {
+				root := mkLaggingSourceRepo(t)
+				deps := SemanticDeps{
+					QueryClient: queryEmbedderStub{},
+					Client:      &embed.Client{},
+					storeSearcherSeam: &storeStub{searchResults: []embeddings.SearchResult{
+						{SymbolName: "marked", FilePath: "a.go", SymbolKind: "func", StartLine: 4, Distance: 0.3},
+					}},
+					RRFWeights: embeddings.DefaultRRFWeights(),
+				}
+				res, err := handleSemanticSearch(context.Background(),
+					SemanticSearchInput{Repo: root, Query: "marked"}, deps, "")
+				if err != nil {
+					t.Fatalf("handleSemanticSearch: %v", err)
 				}
 				return textContentOf(t, res)
 			},
