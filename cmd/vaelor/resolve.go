@@ -100,6 +100,11 @@ func resolveRoot(ctx context.Context, repo, ref string, deps analyze.Deps) (root
 		repoResolveTotal.WithLabelValues(resolveOutcomeMiss).Inc()
 		return root, cleanup, err
 	}
+	// Record the (requested, resolved) pair into the provenance slot on the
+	// context. The addTool wrapper reads this after the handler returns to
+	// attach the provenance footer centrally — after budget shaping, so it
+	// survives truncation. Write-once: first writer wins, later calls dropped.
+	recordProvenance(ctx, repo, root)
 	repoResolveTotal.WithLabelValues(outcome).Inc()
 	return root, cleanup, nil
 }

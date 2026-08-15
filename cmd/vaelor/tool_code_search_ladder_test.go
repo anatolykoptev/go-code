@@ -69,7 +69,7 @@ func TestCodeSearch_LargeResultUnderBudget_IsParseableXML(t *testing.T) {
 
 	// Simulate the addTool wrapper — this is where DefaultBudget shaping is
 	// applied to the first TextContent block.
-	applyBudgetAndTook(res, 5*time.Millisecond)
+	applyBudgetAndTook(res, 5*time.Millisecond, "", "")
 
 	if len(res.Content) == 0 {
 		t.Fatal("result has no content")

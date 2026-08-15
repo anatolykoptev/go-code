@@ -39,6 +39,34 @@ const budgetAppliedMarker = "\n[budget-applied]"
 // tookFooterPrefix is the sentinel prefix of the took_ms footer.
 const tookFooterPrefix = "\ntook_ms="
 
+// metaFooterPrefix is the sentinel prefix of the provenance envelope footer
+// (<!-- meta: {...} -->). Used by HasMetaFooter to detect an already-attached
+// footer so the central attachment in applyBudgetAndTook is idempotent — a
+// tool that already folded the footer into its body (and the footer survived
+// shaping) must not get a second one.
+const metaFooterPrefix = "<!-- meta:"
+
+// HasMetaFooter reports whether text ENDS with a provenance envelope footer
+// (<!-- meta: {...} -->). Used by the central attachment in applyBudgetAndTook
+// to skip double-appending when a tool already attached one that survived
+// budget shaping.
+//
+// Anchored to the last line rather than a substring search, unlike the sibling
+// HasTookFooter: a response BODY can legitimately contain the sentinel — a
+// code search over vaelor's own source returns the very line that builds this
+// footer — and a Contains check reads that as "already attached", silently
+// dropping the real footer from exactly the query most likely to be run
+// against this repo.
+//
+// The last line is a sound anchor because the footer is the final thing
+// appended before took_ms, and truncation only ever cuts before the end:
+// Shape leaves the footer whole or removes it outright, never a fragment at
+// the tail. A text with no newline is treated as a single line.
+func HasMetaFooter(text string) bool {
+	last := text[strings.LastIndex(text, "\n")+1:]
+	return strings.HasPrefix(last, metaFooterPrefix) && strings.HasSuffix(last, "-->")
+}
+
 // Shape applies a response budget to text. When the text fits within budget
 // (or budget <= 0), it is returned unchanged. When it exceeds the budget,
 // Shape truncates at the last newline that fits within the budget and
