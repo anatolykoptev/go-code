@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.64.2](https://github.com/anatolykoptev/vaelor/compare/v1.64.1...v1.64.2) (2026-08-15)
+
+
+### Fixed
+
+* **mcpmeta:** carry the measured duration on the centrally-attached footer ([#777](https://github.com/anatolykoptev/vaelor/issues/777)) ([6b7691f](https://github.com/anatolykoptev/vaelor/commit/6b7691f5a8473f96ec955d797a3fbee1ed5a6033))
+
 ## [1.64.1](https://github.com/anatolykoptev/vaelor/compare/v1.64.0...v1.64.1) (2026-08-15)
 
 
