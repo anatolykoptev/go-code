@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.64.0](https://github.com/anatolykoptev/vaelor/compare/v1.63.1...v1.64.0) (2026-08-15)
+
+
+### Added
+
+* **mcpmeta:** report the server-side root and checkout-vs-origin lag ([#771](https://github.com/anatolykoptev/vaelor/issues/771)) ([4f04c2d](https://github.com/anatolykoptev/vaelor/commit/4f04c2d9a0974fde7084c28683aaa1a3ebce9ea1))
+
 ## [1.63.1](https://github.com/anatolykoptev/go-code/compare/v1.63.0...v1.63.1) (2026-08-06)
 
 
