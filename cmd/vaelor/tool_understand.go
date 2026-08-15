@@ -152,9 +152,7 @@ func handleUnderstand(ctx context.Context, input UnderstandInput, deps analyze.D
 
 	// understand is a terminal call — no chaining hint.
 	env := mcpmeta.Wrap(time.Since(t0), "")
-	if sha := deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)); sha != "" {
-		env = mcpmeta.WithFreshness(env, root, sha)
-	}
+	env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
 	// Progressive result-shortening ladder (#685 part 3): full →
 	// no-learnings (drop prior_learnings/graph_signals/tested_by — the
 	// enrichment from external stores, the "surrounding context" around the

@@ -139,6 +139,7 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 			return errResult(fmt.Sprintf("search: %s", err)), nil
 		}
 		env := mcpmeta.Wrap(time.Since(t0), "")
+		env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
 		return metaXMLMarshalResult(formatExpandedSearchXML(input, oxMatches), "code_search", outputDir, env), nil
 	}
 
@@ -151,6 +152,7 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 	if len(matches) == 0 {
 		if suggestions := semanticSuggest(ctx, sem, root, input.Pattern, input.Language); suggestions != "" {
 			env := mcpmeta.Wrap(time.Since(t0), "")
+			env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
 			return metaResult(formatCodeSearchNoMatch(input.Pattern, suggestions), env), nil
 		}
 	}
@@ -167,9 +169,7 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 	}
 	hint := mcpmeta.HintAfterCodeSearch(query, len(matches), firstSym)
 	env := mcpmeta.Wrap(time.Since(t0), hint)
-	if sha := deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)); sha != "" {
-		env = mcpmeta.WithFreshness(env, root, sha)
-	}
+	env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
 	// Progressive result-shortening ladder (#685): try the full result with
 	// context, then matches without context, then a per-file count summary.
 	// renderLadder owns the five invariants (reserve, file-save gate, ceiling,

@@ -49,16 +49,17 @@ func textResult(text string) *mcp.CallToolResult {
 	}
 }
 
-// appendMetaFooter returns `body` with an `<!-- meta: <json> -->` footer
-// only when `env` carries a hint or a staleness warning — a bare duration_ms
-// is pure telemetry with zero analytic value to the consumer, so it is
-// suppressed to cut response token footprint. Returns body unchanged otherwise.
+// appendMetaFooter returns `body` with an `<!-- meta: <json> -->` footer only
+// when `env` carries something actionable (see mcpmeta.Envelope.HasSignal) — a
+// bare duration_ms is pure telemetry with zero analytic value to the consumer,
+// so it is suppressed to cut response token footprint. Returns body unchanged
+// otherwise.
 //
 // Centralises the empty-envelope check + marshal-error fallback that
 // metaResult / metaXMLMarshalResult / metaLargeTextResult previously
 // duplicated.
 func appendMetaFooter(body string, env mcpmeta.Envelope) string {
-	if env.Hint == "" && env.StaleWarning == "" && env.GraphStaleAgeS == 0 {
+	if !env.HasSignal() {
 		return body
 	}
 	js, err := json.Marshal(env)
@@ -68,44 +69,29 @@ func appendMetaFooter(body string, env mcpmeta.Envelope) string {
 	return body + "\n\n<!-- meta: " + string(js) + " -->"
 }
 
-// metaResult returns a text CallToolResult and, when env carries a hint or
-// staleness warning, appends a JSON-encoded "_meta" footer separated by a
-// sentinel marker (HTML comment) so existing human readers and
-// string-matching tests continue to work unchanged.
+// metaResult returns a text CallToolResult and, when env carries a signal,
+// appends a JSON-encoded "_meta" footer separated by a sentinel marker (HTML
+// comment) so existing human readers and string-matching tests continue to work
+// unchanged.
 //
-// An envelope with no hint and no staleness warning falls back to plain
-// textResult — a bare duration_ms alone never triggers the footer.
+// An envelope with nothing actionable falls back to plain textResult — a bare
+// duration_ms alone never triggers the footer.
 func metaResult(text string, env mcpmeta.Envelope) *mcp.CallToolResult {
 	return textResult(appendMetaFooter(text, env))
 }
 
-// metaXMLMarshalResult is the envelope-aware variant of xmlMarshalResult.
-// It marshals v as compact XML and appends the meta envelope footer before
-// passing to largeTextResult. Falls back to xmlMarshalResult on marshal error.
-func metaXMLMarshalResult(v any, toolName, outputDir string, env mcpmeta.Envelope) *mcp.CallToolResult {
-	data, err := xml.Marshal(v)
-	if err != nil {
-		return errResult(fmt.Sprintf("marshal: %s", err))
-	}
-	return largeTextResult(appendMetaFooter(xml.Header+string(data), env), toolName, outputDir)
-}
-
-// metaLargeTextResult is the envelope-aware variant of largeTextResult.
-// When the body is saved to a file (large output), the envelope footer is
-// appended to the visible summary message rather than the file body — the
-// agent always sees the hint and timing regardless of whether the body is
-// inline or file-backed.
-func metaLargeTextResult(text, toolName, outputDir string, env mcpmeta.Envelope) *mcp.CallToolResult {
-	// Short-circuit: avoid the Content[0] cast dance for the common no-signal path
-	// (no hint, no staleness warning — a bare duration_ms never gets a footer).
-	if env.Hint == "" && env.StaleWarning == "" {
-		return largeTextResult(text, toolName, outputDir)
-	}
-	res := largeTextResult(text, toolName, outputDir)
-	// Append the footer to the visible content of the result.
-	// When body was saved to file, res.Content[0] holds the short summary —
-	// that is the text the agent reads, so the footer must go there.
-	if len(res.Content) == 0 {
+// withFooterOnVisibleContent appends the envelope footer to the text the agent
+// actually READS, which is not always the text a tool produced: when
+// largeTextResult spills a big body to a file it returns a short summary
+// instead, so a footer folded into the body before that decision travels into
+// the file and never reaches the caller.
+//
+// Both envelope-aware renderers route through here. Appending the footer to the
+// body first and hoping the body survives is the bug this exists to prevent,
+// and it is the second time these renderers drifted apart — HasSignal unified
+// the "is there a signal" question, this unifies "where does it go".
+func withFooterOnVisibleContent(res *mcp.CallToolResult, env mcpmeta.Envelope) *mcp.CallToolResult {
+	if !env.HasSignal() || res == nil || len(res.Content) == 0 {
 		return res
 	}
 	tc, ok := res.Content[0].(*mcp.TextContent)
@@ -115,6 +101,26 @@ func metaLargeTextResult(text, toolName, outputDir string, env mcpmeta.Envelope)
 	tc.Text = appendMetaFooter(tc.Text, env)
 	res.Content[0] = tc
 	return res
+}
+
+// metaXMLMarshalResult is the envelope-aware variant of xmlMarshalResult.
+// It marshals v as compact XML and attaches the meta envelope footer to the
+// visible result. Falls back to errResult on marshal error.
+func metaXMLMarshalResult(v any, toolName, outputDir string, env mcpmeta.Envelope) *mcp.CallToolResult {
+	data, err := xml.Marshal(v)
+	if err != nil {
+		return errResult(fmt.Sprintf("marshal: %s", err))
+	}
+	return withFooterOnVisibleContent(largeTextResult(xml.Header+string(data), toolName, outputDir), env)
+}
+
+// metaLargeTextResult is the envelope-aware variant of largeTextResult.
+// When the body is saved to a file (large output), the envelope footer is
+// appended to the visible summary message rather than the file body — the
+// agent always sees the hint and timing regardless of whether the body is
+// inline or file-backed.
+func metaLargeTextResult(text, toolName, outputDir string, env mcpmeta.Envelope) *mcp.CallToolResult {
+	return withFooterOnVisibleContent(largeTextResult(text, toolName, outputDir), env)
 }
 
 // largeTextResult returns a text result, saving to file if content exceeds maxInlineCharsDefault.
@@ -275,4 +281,25 @@ func applyPolicy(_ context.Context, root string, r *review.DeltaResult) []policy
 		}
 		return string(b)
 	})
+}
+
+// annotateEnv attaches every provenance signal a local-path answer needs, so a
+// tool cannot ship with only some of them wired.
+//
+// Three independent questions, all of which must be clean before an answer is
+// current, and none of which implies the others:
+//
+//   - WithFreshness: has the INDEX kept up with the CHECKOUT?
+//   - WithCheckoutLag: has the CHECKOUT kept up with ORIGIN?
+//   - WithSourcePath: was the repo named by a path that is not where it lives?
+//
+// Each stays silent when it has nothing to report, so the common case adds no
+// footer at all. indexedSHA may be empty — freshness is then simply unknown
+// and skipped, which is not the same as fresh.
+func annotateEnv(env mcpmeta.Envelope, requestedRepo, root, indexedSHA string) mcpmeta.Envelope {
+	if indexedSHA != "" {
+		env = mcpmeta.WithFreshness(env, root, indexedSHA)
+	}
+	env = mcpmeta.WithSourcePath(env, requestedRepo, root)
+	return mcpmeta.WithCheckoutLag(env, root)
 }
