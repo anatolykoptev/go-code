@@ -180,7 +180,7 @@ func TestImpact_LargeResultUnderBudget_IsParseableJSON(t *testing.T) {
 	}
 
 	// Simulate the addTool wrapper.
-	applyBudgetAndTook(res, 5*time.Millisecond)
+	applyBudgetAndTook(res, 5*time.Millisecond, "", "")
 
 	text := impactResultText(t, res)
 

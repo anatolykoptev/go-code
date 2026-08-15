@@ -15,7 +15,7 @@ import (
 func TestAddTookFooter_PresentOnEveryResponse(t *testing.T) {
 	// Simulate what the addTool wrapper does after a handler returns.
 	res := textResult("hello world")
-	applyBudgetAndTook(res, 42*time.Millisecond)
+	applyBudgetAndTook(res, 42*time.Millisecond, "", "")
 
 	got := textContentOf(t, res)
 	if !strings.Contains(got, "took_ms=") {
@@ -30,7 +30,7 @@ func TestAddTookFooter_PresentOnEveryResponse(t *testing.T) {
 // unchanged (no budget shaping, no took_ms).
 func TestAddTookFooter_NotOnErrors(t *testing.T) {
 	res := errResult("something went wrong")
-	applyBudgetAndTook(res, 10*time.Millisecond)
+	applyBudgetAndTook(res, 10*time.Millisecond, "", "")
 
 	got := textContentOf(t, res)
 	if strings.Contains(got, "took_ms=") {
@@ -43,7 +43,7 @@ func TestAddTookFooter_NotOnErrors(t *testing.T) {
 func TestAddBudgetShaping_OverBudget(t *testing.T) {
 	long := strings.Repeat("line of content\n", 1000)
 	res := textResult(long)
-	applyBudgetAndTook(res, 5*time.Millisecond)
+	applyBudgetAndTook(res, 5*time.Millisecond, "", "")
 
 	got := textContentOf(t, res)
 	if len(got) >= len(long) {
@@ -63,7 +63,7 @@ func TestAddBudgetShaping_SkipsAlreadyShaped(t *testing.T) {
 	// Simulate a tool that shaped its own output.
 	alreadyShaped := "head content\n[truncated: 500 more chars — pass offset=10]"
 	res := textResult(alreadyShaped)
-	applyBudgetAndTook(res, 1*time.Millisecond)
+	applyBudgetAndTook(res, 1*time.Millisecond, "", "")
 
 	got := textContentOf(t, res)
 	// Should not have a second truncation footer.

@@ -112,7 +112,7 @@ func TestSemanticSearch_LargeResultUnderBudget_IsParseableXML(t *testing.T) {
 	}
 
 	// Simulate the addTool wrapper.
-	applyBudgetAndTook(res, 5*time.Millisecond)
+	applyBudgetAndTook(res, 5*time.Millisecond, "", "")
 
 	text := semanticResultText(t, res)
 
