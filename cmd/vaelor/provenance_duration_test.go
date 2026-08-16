@@ -43,25 +43,32 @@ func parseMetaFooter(t *testing.T, text string) mcpmeta.Envelope {
 // record it reads to decide whether the answer can be trusted, sitting beside
 // a took_ms line carrying the real number and contradicting it.
 //
-// Mutation that must turn it RED: in applyBudgetAndTook, build the envelope as
-// `mcpmeta.Envelope{}` instead of `mcpmeta.Wrap(elapsed, "")`.
+// The wrapper owns DurationMS: it sets it from its own measurement after
+// reading the merged envelope from the slot. A recorded envelope's
+// DurationMS is never merged (mergeEnvelope skips it).
+//
+// Mutation that must turn it RED: in applyBudgetAndTook, remove the
+// `env.DurationMS = elapsed.Milliseconds()` line. The footer then carries
+// duration_ms=0 — a false measurement.
 func TestApplyBudgetAndTook_CentralFooterCarriesMeasuredDuration(t *testing.T) {
 	root := mkLaggingRepo(t)
 
 	// Over budget, so the central attachment is the producer of this footer.
+	// The envelope carries a checkout_lag signal so HasSignal fires.
+	env := mcpmeta.WithCheckoutLag(mcpmeta.Envelope{}, root)
 	res := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: strings.Repeat("line of content\n", 1000)}},
 	}
-	applyBudgetAndTook(res, 1234*time.Millisecond, root, root)
+	applyBudgetAndTook(res, 1234*time.Millisecond, env)
 
 	got := textContentOf(t, res)
-	env := parseMetaFooter(t, got)
-	if env.CheckoutLag == "" {
-		t.Fatalf("fixture is inert: the footer under test carries no provenance, got %+v", env)
+	parsed := parseMetaFooter(t, got)
+	if parsed.CheckoutLag == "" {
+		t.Fatalf("fixture is inert: the footer under test carries no provenance, got %+v", parsed)
 	}
-	if env.DurationMS != 1234 {
+	if parsed.DurationMS != 1234 {
 		t.Fatalf("the central footer must carry the measured duration; got duration_ms=%d, want 1234 — "+
-			"a zero here is a false measurement, not an absent field", env.DurationMS)
+			"a zero here is a false measurement, not an absent field", parsed.DurationMS)
 	}
 }
 
@@ -74,12 +81,12 @@ func TestApplyBudgetAndTook_CentralFooterCarriesMeasuredDuration(t *testing.T) {
 // Mutation that must turn it RED: add `|| e.DurationMS != 0` to
 // mcpmeta.Envelope.HasSignal.
 func TestApplyBudgetAndTook_DurationAloneDoesNotBreakSilence(t *testing.T) {
-	root := t.TempDir() // no .git: nothing to report
-
+	// Empty envelope — no signal at all. The wrapper sets DurationMS but
+	// HasSignal is still false, so no footer.
 	res := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: "short quiet response"}},
 	}
-	applyBudgetAndTook(res, 4567*time.Millisecond, root, root)
+	applyBudgetAndTook(res, 4567*time.Millisecond, mcpmeta.Envelope{})
 
 	got := textContentOf(t, res)
 	if strings.Contains(got, "<!-- meta:") {

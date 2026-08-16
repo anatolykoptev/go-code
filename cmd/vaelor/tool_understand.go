@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/anatolykoptev/vaelor/internal/analyze"
 	"github.com/anatolykoptev/vaelor/internal/callgraph"
@@ -68,8 +67,6 @@ func handleUnderstand(ctx context.Context, input UnderstandInput, deps analyze.D
 		return errResult(fmt.Sprintf("resolve repo: %s", err)), nil
 	}
 	defer cleanup()
-
-	t0 := time.Now()
 
 	// Remote repos only: avoid a synchronous full repo parse when the AGE call
 	// graph is not yet built. Start a background build and return a building
@@ -151,8 +148,9 @@ func handleUnderstand(ctx context.Context, input UnderstandInput, deps analyze.D
 	}
 
 	// understand is a terminal call — no chaining hint.
-	env := mcpmeta.Wrap(time.Since(t0), "")
-	env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
+	env := mcpmeta.Envelope{}
+	env = mcpmeta.WithFreshness(env, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
+	recordEnvelope(ctx, env)
 	// Progressive result-shortening ladder (#685 part 3): full →
 	// no-learnings (drop prior_learnings/graph_signals/tested_by — the
 	// enrichment from external stores, the "surrounding context" around the
@@ -176,9 +174,9 @@ func handleUnderstand(ctx context.Context, input UnderstandInput, deps analyze.D
 	// sentinel so the wrapper skips re-shaping at DefaultBudget (matches
 	// semantic_search's behaviour).
 	ladder := mcpmeta.Ladder{
-		{Name: "full", Render: func() string { return formatUnderstandFull(result, env) }},
-		{Name: "no-learnings", Render: func() string { return formatUnderstandNoLearnings(result, env) }},
-		{Name: "counts", Render: func() string { return formatUnderstandCounts(result, env) }},
+		{Name: "full", Render: func() string { return formatUnderstandFull(result) }},
+		{Name: "no-learnings", Render: func() string { return formatUnderstandNoLearnings(result) }},
+		{Name: "counts", Render: func() string { return formatUnderstandCounts(result) }},
 	}
 	budget := mcpmeta.ResolveBudget(input.MaxBytes, mcpmeta.DefaultBudget)
 	body := renderLadder(ladder, "understand", outputDir, budget)
@@ -284,7 +282,7 @@ var understandFormatCount *int64
 // formatUnderstandFull is ladder rung 1: the complete UnderstandResult JSON
 // with the meta envelope footer. This is the fullest rendering — every
 // callee, caller, body analysis, prior learning, graph signal, etc.
-func formatUnderstandFull(result *compound.UnderstandResult, env mcpmeta.Envelope) string {
+func formatUnderstandFull(result *compound.UnderstandResult) string {
 	if understandFormatCount != nil {
 		atomic.AddInt64(understandFormatCount, 1)
 	}
@@ -292,14 +290,14 @@ func formatUnderstandFull(result *compound.UnderstandResult, env mcpmeta.Envelop
 	if err != nil {
 		return fmt.Sprintf(`{"error":"marshal: %s"}`, err.Error())
 	}
-	return appendMetaFooter(string(data), env)
+	return string(data)
 }
 
 // formatUnderstandNoLearnings is ladder rung 2: the UnderstandResult JSON
 // with the enrichment fields dropped (prior_learnings, graph_signals,
 // tested_by) — the "surrounding context" around the core call topology.
 // The callees/callers lists (the primary payload) are preserved.
-func formatUnderstandNoLearnings(result *compound.UnderstandResult, env mcpmeta.Envelope) string {
+func formatUnderstandNoLearnings(result *compound.UnderstandResult) string {
 	if understandFormatCount != nil {
 		atomic.AddInt64(understandFormatCount, 1)
 	}
@@ -314,7 +312,7 @@ func formatUnderstandNoLearnings(result *compound.UnderstandResult, env mcpmeta.
 	if err != nil {
 		return fmt.Sprintf(`{"error":"marshal: %s"}`, err.Error())
 	}
-	return appendMetaFooter(string(data), env)
+	return string(data)
 }
 
 // understandCountsResult is ladder rung 3 for understand: the symbol
@@ -340,7 +338,7 @@ type understandCountsResult struct {
 
 // formatUnderstandCounts is ladder rung 3: per-symbol counts with the
 // per-ref lists dropped.
-func formatUnderstandCounts(result *compound.UnderstandResult, env mcpmeta.Envelope) string {
+func formatUnderstandCounts(result *compound.UnderstandResult) string {
 	if understandFormatCount != nil {
 		atomic.AddInt64(understandFormatCount, 1)
 	}
@@ -359,5 +357,5 @@ func formatUnderstandCounts(result *compound.UnderstandResult, env mcpmeta.Envel
 	if err != nil {
 		return fmt.Sprintf(`{"error":"marshal: %s"}`, err.Error())
 	}
-	return appendMetaFooter(string(data), env)
+	return string(data)
 }

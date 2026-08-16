@@ -11,6 +11,7 @@ import (
 	"github.com/anatolykoptev/vaelor/internal/analyze"
 	"github.com/anatolykoptev/vaelor/internal/forge"
 	"github.com/anatolykoptev/vaelor/internal/ingest"
+	"github.com/anatolykoptev/vaelor/internal/mcpmeta"
 	"github.com/anatolykoptev/vaelor/internal/workspace"
 )
 
@@ -101,10 +102,17 @@ func resolveRoot(ctx context.Context, repo, ref string, deps analyze.Deps) (root
 		return root, cleanup, err
 	}
 	// Record the (requested, resolved) pair into the provenance slot on the
-	// context. The addTool wrapper reads this after the handler returns to
-	// attach the provenance footer centrally — after budget shaping, so it
-	// survives truncation. Write-once: first writer wins, later calls dropped.
+	// context. The addTool wrapper reads this after the handler returns.
+	// Write-once: first writer wins, later calls dropped.
 	recordProvenance(ctx, repo, root)
+	// Record the path signals (SourcePath, CheckoutLag) into the envelope
+	// slot. The tool contributes freshness (WithFreshness) separately via
+	// recordEnvelope; the wrapper merges both and renders once after shaping.
+	// resolveRoot is the ONLY writer of path signals, so WithCheckoutLag is
+	// never called with an empty root — the process-CWD hazard the old
+	// `resolved != ""` guard existed to prevent is structurally impossible here.
+	recordEnvelope(ctx, mcpmeta.WithCheckoutLag(
+		mcpmeta.WithSourcePath(mcpmeta.Envelope{}, repo, root), root))
 	repoResolveTotal.WithLabelValues(outcome).Inc()
 	return root, cleanup, nil
 }

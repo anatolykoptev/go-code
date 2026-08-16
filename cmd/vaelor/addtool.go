@@ -40,6 +40,10 @@ type registeredToolInput struct {
 //     is appended so the agent knows the tail was truncated and how to
 //     narrow/paginate.
 //  2. A compact took_ms footer — one-line observability on every response.
+//  3. A provenance envelope footer — rendered ONCE, after shaping, from the
+//     merged envelope recorded by resolveRoot (path signals) and the tool
+//     (freshness/hint). The code knows whether a response carries provenance;
+//     it does not sniff rendered text to infer it.
 //
 // Tools that accept a max_bytes / max_tokens override should call
 // mcpmeta.Shape on their output text themselves before returning; the
@@ -57,9 +61,11 @@ func addTool[In any](
 	registeredToolInputs = append(registeredToolInputs, registeredToolInput{Name: t.Name, In: reflect.TypeFor[In]()})
 	argnorm.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, error) {
 		// Seed the provenance slot so resolveRoot can record the (requested,
-		// resolved) root pair. After the handler returns, the wrapper reads
-		// the snapshot and attaches the provenance footer centrally — after
-		// shaping, so it survives budget truncation.
+		// resolved) root pair AND the path signals into the envelope, and the
+		// tool can record freshness/hint. After the handler returns, the
+		// wrapper reads the merged envelope snapshot and renders the
+		// provenance footer centrally — after shaping, so it survives budget
+		// truncation.
 		ctx = seedProvenanceSlot(ctx)
 		t0 := time.Now()
 		res, err := h(ctx, req, in)
@@ -77,26 +83,28 @@ func addTool[In any](
 			return res, nil
 		}
 		elapsed := time.Since(t0)
-		requested, resolved, _ := provenanceSnapshot(ctx)
-		applyBudgetAndTook(res, elapsed, requested, resolved)
+		env := envelopeSnapshot(ctx)
+		applyBudgetAndTook(res, elapsed, env)
 		return res, nil
 	})
 }
 
 // applyBudgetAndTook mutates res in place: applies the default response
-// budget shaping to the first text content block, appends the provenance
-// footer, then appends the took_ms footer. Already-shaped output (from a tool
-// that applied a custom budget) is not re-shaped; already-took-tagged output
-// is not double-tagged; the provenance footer is idempotent — if the body
-// already carries one that survived shaping, it is not re-attached.
+// budget shaping to the first text content block, renders the provenance
+// envelope footer (once, after shaping), then appends the took_ms footer.
+// Already-shaped output (from a tool that applied a custom budget) is not
+// re-shaped; already-took-tagged output is not double-tagged.
 //
-// The provenance footer is attached AFTER shaping (not before) so it sits
-// outside the truncated tail — the per-tool annotateEnv path folds the footer
-// into the body before the wrapper runs, where Shape cuts it. The central
-// attachment here restores it. requested and resolved are the (requested,
-// resolved) repo root pair recorded by resolveRoot; empty when no repo was
-// resolved (non-repo tools, or the handler did not call resolveRoot).
-func applyBudgetAndTook(res *mcp.CallToolResult, elapsed time.Duration, requested, resolved string) {
+// The provenance footer is rendered AFTER shaping (not before) so it sits
+// outside the truncated tail. env is the merged envelope from the
+// provenance slot — resolveRoot contributed path signals (SourcePath,
+// CheckoutLag), the tool contributed freshness (StaleWarning) and Hint.
+// DurationMS is set here from the wrapper's own measurement; a recorded
+// envelope's DurationMS is never used (the merge drops it). A zero-signal
+// envelope (HasSignal == false) produces no footer at all — silence is
+// load-bearing, a footer on every response trains the agent to ignore the
+// field.
+func applyBudgetAndTook(res *mcp.CallToolResult, elapsed time.Duration, env mcpmeta.Envelope) {
 	if res == nil || res.IsError {
 		return
 	}
@@ -115,31 +123,22 @@ func applyBudgetAndTook(res *mcp.CallToolResult, elapsed time.Duration, requeste
 	// Strip the budget-applied marker (if any) so it's not visible to the
 	// agent — it was only there to prevent re-shaping (#582).
 	text = mcpmeta.StripBudgetMarker(text)
-	// Provenance footer — attached centrally, AFTER shaping, so it survives
-	// budget truncation. Idempotent: if the tool already attached a meta
-	// footer (via annotateEnv) and it survived shaping, skip. On a large
-	// response the per-tool footer is truncated away by Shape, so this step
-	// sees none and restores it — which is the fix.
+	// Provenance footer — rendered ONCE, after shaping, from the merged
+	// envelope. No sniffing: the code knows whether provenance was recorded;
+	// it does not inspect the body for a sentinel. A body that QUOTES the
+	// sentinel (a code_search over this repo's own source) or that APPENDS
+	// after its own footer (a tool's condensation marker) still gets exactly
+	// one envelope — the one recorded in the slot, rendered here.
 	//
-	// resolved == "" means no repo was resolved (a non-repo tool, or a handler
-	// that never reached resolveRoot) and MUST short-circuit: gitDir joins its
-	// argument with ".git", so WithCheckoutLag("") stats ".git" relative to the
-	// PROCESS working directory. A binary started from inside a checkout would
-	// then report that checkout's lag on responses that touched no repo at all.
-	// The suite cannot see this by accident — `go test ./cmd/vaelor/` runs with
-	// CWD at cmd/vaelor/, where no .git exists — so it is pinned explicitly by
-	// TestApplyBudgetAndTook_NoRepoResolved_DoesNotReportProcessCWD.
-	if resolved != "" && !mcpmeta.HasMetaFooter(text) {
-		// Wrap, not a bare Envelope: DurationMS has no omitempty (it is
-		// deliberately always serialized), so a bare envelope publishes
-		// "duration_ms":0 on every centrally-attached footer — a measured-
-		// looking zero in a record read for provenance. The wrapper already
-		// timed the handler; use that number.
-		env := mcpmeta.Wrap(elapsed, "")
-		env = mcpmeta.WithSourcePath(env, requested, resolved)
-		env = mcpmeta.WithCheckoutLag(env, resolved)
-		text = appendMetaFooter(text, env)
+	// DurationMS is owned by the wrapper alone. The merge in recordEnvelope
+	// never carries it from a recorded envelope; set it here from the
+	// measured elapsed time so the footer carries a real measurement, not a
+	// measured-looking zero.
+	env.DurationMS = elapsed.Milliseconds()
+	if env.DurationMS < 1 {
+		env.DurationMS = 1
 	}
+	text = appendMetaFooter(text, env)
 	// took_ms footer — idempotent.
 	text = mcpmeta.AppendTook(text, elapsed)
 	tc.Text = text

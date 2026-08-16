@@ -639,8 +639,8 @@ func finalResult(
 	reranked := codegraph.RerankSemanticResults(ctx, root, input.Query, candidates, topK)
 	reranked = annotateWithPageRank(reranked, prSignals)
 	hint := mcpmeta.HintAfterCodeSearch(input.Query, len(reranked), symbolNameFromResults(reranked))
-	env := mcpmeta.Wrap(time.Since(t0), hint)
-	env = annotateEnv(env, input.Repo, root, deps.AnalyzeDeps.IndexedSHA(ctx, repoKey))
+	env := mcpmeta.Envelope{Hint: hint}
+	env = mcpmeta.WithFreshness(env, root, deps.AnalyzeDeps.IndexedSHA(ctx, repoKey))
 	// #691: degradation marker — when the retrieval path fused a stale AGE
 	// graph, carry the graph age on the response envelope so a caller can
 	// tell it received degraded ranking. Zero (omitted via omitempty) when
@@ -648,6 +648,7 @@ func finalResult(
 	if graphStaleAgeS > 0 {
 		env.GraphStaleAgeS = graphStaleAgeS
 	}
+	recordEnvelope(ctx, env)
 	// Progressive result-shortening ladder (#685 part 2): full → compact
 	// (drop auxiliary attrs) → counts (per-file hit counts). renderLadder
 	// owns the five invariants so this tool cannot forget one.
@@ -675,13 +676,13 @@ func finalResult(
 	mappings := deps.AnalyzeDeps.PathMappings
 	ladder := mcpmeta.Ladder{
 		{Name: "full", Render: func() string {
-			return appendMetaFooter(formatSemanticResults(input, reranked, mappings), env)
+			return formatSemanticResults(input, reranked, mappings)
 		}},
 		{Name: "no-snippet", Render: func() string {
-			return appendMetaFooter(formatSemanticResultsCompact(input, reranked, mappings), env)
+			return formatSemanticResultsCompact(input, reranked, mappings)
 		}},
 		{Name: "counts", Render: func() string {
-			return appendMetaFooter(formatSemanticResultsCounts(input, reranked, mappings), env)
+			return formatSemanticResultsCounts(input, reranked, mappings)
 		}},
 	}
 	budget := mcpmeta.ResolveBudget(input.MaxBytes, mcpmeta.DefaultBudget)
