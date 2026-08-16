@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.64.3](https://github.com/anatolykoptev/vaelor/compare/v1.64.2...v1.64.3) (2026-08-16)
+
+
+### Performance
+
+* **goanalysis:** release the types.Info maps nothing reads, across the whole graph ([#782](https://github.com/anatolykoptev/vaelor/issues/782)) ([86f04c9](https://github.com/anatolykoptev/vaelor/commit/86f04c9293350bf999dbf76f05f0aa0862a1cbc1))
+
 ## [1.64.2](https://github.com/anatolykoptev/vaelor/compare/v1.64.1...v1.64.2) (2026-08-15)
 
 
