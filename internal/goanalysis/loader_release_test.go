@@ -45,6 +45,11 @@ type Simple struct {
 func (g *Simple) Greet(name string) string {
 	return g.Prefix + name
 }
+
+// Default exists so the loaded package has a package-level initializer and
+// types.Info.InitOrder is non-empty — without it the InitOrder assertion below
+// would pass whether or not the map was ever released.
+var Default = &Simple{Prefix: "hi "}
 `)
 	write("main.go", `package main
 
@@ -93,6 +98,11 @@ func TestLoadPackages_ReleasesUnreadTypeInfoMaps(t *testing.T) {
 	if len(pkg.TypesInfo.Uses) == 0 {
 		t.Error("Uses must survive: the resolver reads it")
 	}
+	if len(pkg.TypesInfo.Selections) == 0 {
+		t.Error("Selections must survive: the resolver reads it (resolver.go, " +
+			"resolver_dispatch.go). Dropping it would not panic — a nil map reads " +
+			"as empty — so method-call resolution would quietly return nothing.")
+	}
 
 	// Released — nothing reads these, and Types is the expensive one.
 	if pkg.TypesInfo.Types != nil {
@@ -106,6 +116,12 @@ func TestLoadPackages_ReleasesUnreadTypeInfoMaps(t *testing.T) {
 	}
 	if pkg.TypesInfo.Instances != nil {
 		t.Errorf("Instances must be released, got %d entries", len(pkg.TypesInfo.Instances))
+	}
+	if pkg.TypesInfo.InitOrder != nil {
+		t.Errorf("InitOrder must be released, got %d entries", len(pkg.TypesInfo.InitOrder))
+	}
+	if pkg.TypesInfo.FileVersions != nil {
+		t.Errorf("FileVersions must be released, got %d entries", len(pkg.TypesInfo.FileVersions))
 	}
 }
 
