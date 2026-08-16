@@ -2,6 +2,13 @@
 
 **2026-07-17:** The project was renamed from **go-code** to **Vaelor**. Older entries refer to the project under its former name and are left intact.
 
+## [1.64.4](https://github.com/anatolykoptev/vaelor/compare/v1.64.3...v1.64.4) (2026-08-16)
+
+
+### Changed
+
+* **provenance:** assemble the envelope in the wrapper instead of sniffing text ([#785](https://github.com/anatolykoptev/vaelor/issues/785)) ([414bc94](https://github.com/anatolykoptev/vaelor/commit/414bc9405ac35ec99ca50dc060ee96540812cce4))
+
 ## [1.64.3](https://github.com/anatolykoptev/vaelor/compare/v1.64.2...v1.64.3) (2026-08-16)
 
 
