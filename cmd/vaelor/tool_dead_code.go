@@ -94,8 +94,6 @@ func handleDeadCode(ctx context.Context, input DeadCodeInput, deps analyze.Deps,
 		return errResult(fmt.Sprintf("build call graph: %s", err)), nil
 	}
 
-	t0 := time.Now()
-
 	result := deadcode.Analyze(cg, deadcode.Options{
 		IncludeExported: input.IncludeExported,
 		HookCallbacks:   cg.HookCallbacks,
@@ -181,9 +179,10 @@ func handleDeadCode(ctx context.Context, input DeadCodeInput, deps analyze.Deps,
 	// Build hint: find the worst-offender file by dead-symbol count.
 	worstFile, worstCount := deadCodeWorstFile(symbols)
 	hint := mcpmeta.HintAfterDeadCode(worstFile, worstCount)
-	env := mcpmeta.Wrap(time.Since(t0), hint)
-	env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
-	return metaXMLMarshalResult(resp, "dead_code", outputDir, env), nil
+	env := mcpmeta.Envelope{Hint: hint}
+	env = mcpmeta.WithFreshness(env, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
+	recordEnvelope(ctx, env)
+	return xmlMarshalResult(resp, "dead_code", outputDir), nil
 }
 
 // deadCodeWorstFile returns the file with the most dead symbols and its count.

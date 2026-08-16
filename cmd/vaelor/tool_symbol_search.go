@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/anatolykoptev/vaelor/internal/analyze"
 	"github.com/anatolykoptev/vaelor/internal/codegraph"
@@ -114,8 +113,6 @@ func registerSymbolSearch(server *mcp.Server, cfg Config, deps analyze.Deps, sem
 		}
 		defer cleanup()
 
-		t0 := time.Now()
-
 		symbols, err := analyze.SearchSymbols(ctx, analyze.SymbolSearchInput{
 			Root:        root,
 			Query:       input.Query,
@@ -131,10 +128,10 @@ func registerSymbolSearch(server *mcp.Server, cfg Config, deps analyze.Deps, sem
 		if len(symbols) == 0 {
 			hint := indexedPathsHint()
 			if suggestions := semanticSuggest(ctx, sem, root, input.Query, input.Language); suggestions != "" {
-				env := mcpmeta.Wrap(time.Since(t0), "")
-				env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
+				recordEnvelope(ctx, mcpmeta.WithFreshness(mcpmeta.Envelope{},
+					root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root))))
 				body := formatSymbolSearchNoMatch(input.Query, suggestions) + "\n\n" + hint
-				return metaResult(body, env), nil
+				return textResult(body), nil
 			}
 			return textResult(fmt.Sprintf("No symbols found matching %q.\n\n%s", input.Query, hint)), nil
 		}
@@ -145,9 +142,10 @@ func registerSymbolSearch(server *mcp.Server, cfg Config, deps analyze.Deps, sem
 			firstSym = symbols[0].Name
 		}
 		hint := mcpmeta.HintAfterCodeSearch(input.Query, len(symbols), firstSym)
-		env := mcpmeta.Wrap(time.Since(t0), hint)
-		env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
-		return metaLargeTextResult(formatSymbolSearchXML(input.Query, symbols, root), "symbol_search", outputDir, env), nil
+		env := mcpmeta.Envelope{Hint: hint}
+		env = mcpmeta.WithFreshness(env, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
+		recordEnvelope(ctx, env)
+		return largeTextResult(formatSymbolSearchXML(input.Query, symbols, root), "symbol_search", outputDir), nil
 	})
 }
 

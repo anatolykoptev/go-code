@@ -167,7 +167,7 @@ func TestCallTrace_LargeResultUnderBudget_IsParseableXML(t *testing.T) {
 	}
 
 	// Simulate the addTool wrapper.
-	applyBudgetAndTook(res, 5*time.Millisecond, "", "")
+	applyBudgetAndTook(res, 5*time.Millisecond, mcpmeta.Envelope{})
 
 	text := callTraceResultText(t, res)
 

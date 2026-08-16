@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"time"
 
 	"github.com/anatolykoptev/vaelor/internal/analyze"
 	"github.com/anatolykoptev/vaelor/internal/codegraph"
@@ -122,8 +121,6 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 	}
 	defer cleanup()
 
-	t0 := time.Now()
-
 	// Route to ox-codes for scoped or structural search (no Go fallback for new features).
 	if input.Scope != "" && deps.OxCodes != nil {
 		return handleScopedSearch(ctx, input, root, deps.OxCodes, outputDir, deps.PathMappings)
@@ -138,9 +135,9 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 		if err != nil {
 			return errResult(fmt.Sprintf("search: %s", err)), nil
 		}
-		env := mcpmeta.Wrap(time.Since(t0), "")
-		env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
-		return metaXMLMarshalResult(formatExpandedSearchXML(input, oxMatches), "code_search", outputDir, env), nil
+		recordEnvelope(ctx, mcpmeta.WithFreshness(mcpmeta.Envelope{},
+			root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root))))
+		return xmlMarshalResult(formatExpandedSearchXML(input, oxMatches), "code_search", outputDir), nil
 	}
 
 	matches, err := grepSearch(ctx, input, root, deps.OxCodes)
@@ -151,9 +148,9 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 	// Semantic fallback when grep finds nothing.
 	if len(matches) == 0 {
 		if suggestions := semanticSuggest(ctx, sem, root, input.Pattern, input.Language); suggestions != "" {
-			env := mcpmeta.Wrap(time.Since(t0), "")
-			env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
-			return metaResult(formatCodeSearchNoMatch(input.Pattern, suggestions), env), nil
+			recordEnvelope(ctx, mcpmeta.WithFreshness(mcpmeta.Envelope{},
+				root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root))))
+			return textResult(formatCodeSearchNoMatch(input.Pattern, suggestions)), nil
 		}
 	}
 
@@ -168,8 +165,9 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 		query = input.Query
 	}
 	hint := mcpmeta.HintAfterCodeSearch(query, len(matches), firstSym)
-	env := mcpmeta.Wrap(time.Since(t0), hint)
-	env = annotateEnv(env, input.Repo, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
+	env := mcpmeta.Envelope{Hint: hint}
+	env = mcpmeta.WithFreshness(env, root, deps.IndexedSHA(ctx, codegraph.GraphNameFor(root)))
+	recordEnvelope(ctx, env)
 	// Progressive result-shortening ladder (#685): try the full result with
 	// context, then matches without context, then a per-file count summary.
 	// renderLadder owns the five invariants (reserve, file-save gate, ceiling,
@@ -178,9 +176,9 @@ func handleCodeSearchInner(ctx context.Context, input CodeSearchInput, deps anal
 	// receives a hard-truncated mid-document fragment.
 	mappings := deps.PathMappings
 	ladder := mcpmeta.Ladder{
-		{Name: "full", Render: func() string { return marshalSearchXML(formatCodeSearchXML(input, matches, mappings), env) }},
-		{Name: "no-context", Render: func() string { return marshalSearchXML(formatCodeSearchXMLNoContext(input, matches, mappings), env) }},
-		{Name: "counts", Render: func() string { return marshalSearchXML(formatCodeSearchXMLSummary(input, matches, mappings), env) }},
+		{Name: "full", Render: func() string { return marshalSearchXML(formatCodeSearchXML(input, matches, mappings)) }},
+		{Name: "no-context", Render: func() string { return marshalSearchXML(formatCodeSearchXMLNoContext(input, matches, mappings)) }},
+		{Name: "counts", Render: func() string { return marshalSearchXML(formatCodeSearchXMLSummary(input, matches, mappings)) }},
 	}
 	body := renderLadder(ladder, "code_search", outputDir, mcpmeta.DefaultBudget)
 	return textResult(body), nil
@@ -418,10 +416,10 @@ func formatCodeSearchXMLSummary(input CodeSearchInput, matches []codesearch.Sear
 // ladder rung shapes) as a complete XML document string with the xml.Header
 // prolog and the meta envelope footer. Each rung closure in the ladder uses
 // this so every rendering is a self-consistent, parseable document.
-func marshalSearchXML(v any, env mcpmeta.Envelope) string {
+func marshalSearchXML(v any) string {
 	data, err := xml.Marshal(v)
 	if err != nil {
 		return xmlMarshalErrorFragment(err)
 	}
-	return appendMetaFooter(xml.Header+string(data), env)
+	return xml.Header + string(data)
 }

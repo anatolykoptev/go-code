@@ -194,7 +194,7 @@ func TestUnderstand_LargeResultUnderBudget_IsParseableJSON(t *testing.T) {
 	}
 
 	// Simulate the addTool wrapper.
-	applyBudgetAndTook(res, 5*time.Millisecond, "", "")
+	applyBudgetAndTook(res, 5*time.Millisecond, mcpmeta.Envelope{})
 
 	text := understandResultText(t, res)
 
@@ -667,7 +667,7 @@ func TestUnderstand_Rung2DropsEnrichment_IsRung2ValidSmaller(t *testing.T) {
 	//    above DefaultBudget, so no MaxBytes override can make the ladder
 	//    return rung 1 for a result this large — the comparison is about the
 	//    byte savings of rung 2 vs rung 1, a property of the rung design.
-	rung1Text := formatUnderstandFull(richResult, mcpmeta.Wrap(0, ""))
+	rung1Text := formatUnderstandFull(richResult)
 	rung1JSON := jsonBodyOf(rung1Text)
 	if len(rung2JSON) >= len(rung1JSON) {
 		t.Fatalf("rung 2 must be STRICTLY smaller than rung 1: len(rung2)=%d >= len(rung1)=%d\nrung2 (first 200): %s\nrung1 (first 200): %s",

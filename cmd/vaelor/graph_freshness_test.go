@@ -460,11 +460,17 @@ func TestFinalResult_GraphStaleAgeS_MarkerInResponse(t *testing.T) {
 		{FilePath: "pkg/foo.go", SymbolName: "Foo", Distance: 0.3, Source: "semantic"},
 	}
 
-	res, err := finalResult(context.Background(), input, deps, "stale-marker-test", "/tmp/stale-marker-test",
+	// finalResult records the envelope into the slot; the wrapper renders it.
+	// Seed the slot so recordEnvelope has somewhere to write, then drive the
+	// real wrapper render (applyBudgetAndTook) to produce the footer.
+	ctx := seedProvenanceSlot(context.Background())
+	res, err := finalResult(ctx, input, deps, "stale-marker-test", "/tmp/stale-marker-test",
 		results, nil, 10, 65813.0, "", time.Now())
 	if err != nil {
 		t.Fatalf("finalResult error: %v", err)
 	}
+	env := envelopeSnapshot(ctx)
+	applyBudgetAndTook(res, 5*time.Millisecond, env)
 
 	text := textContentOf(t, res)
 	if !strings.Contains(text, "graph_stale_age_s") {
@@ -497,11 +503,14 @@ func TestFinalResult_ZeroGraphStaleAgeS_NoMarker(t *testing.T) {
 		{FilePath: "pkg/foo.go", SymbolName: "Foo", Distance: 0.3, Source: "semantic"},
 	}
 
-	res, err := finalResult(context.Background(), input, deps, "fresh-marker-test", "/tmp/fresh-marker-test",
+	ctx := seedProvenanceSlot(context.Background())
+	res, err := finalResult(ctx, input, deps, "fresh-marker-test", "/tmp/fresh-marker-test",
 		results, nil, 10, 0, "", time.Now())
 	if err != nil {
 		t.Fatalf("finalResult error: %v", err)
 	}
+	env := envelopeSnapshot(ctx)
+	applyBudgetAndTook(res, 5*time.Millisecond, env)
 
 	text := textContentOf(t, res)
 	if strings.Contains(text, "graph_stale_age_s") {
