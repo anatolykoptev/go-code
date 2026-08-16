@@ -78,6 +78,16 @@ func LoadPackages(ctx context.Context, dir string, opts LoadOpts) (*LoadResult, 
 		return nil, fmt.Errorf("packages.Load: %w", err)
 	}
 
+	// packages.Load materialises the ENTIRE types.Info for every package it
+	// touches: NeedTypesInfo is all-or-nothing, so asking for the Defs, Uses
+	// and Selections the resolver reads also builds Types, Implicits, Scopes,
+	// Instances, InitOrder and FileVersions, which nothing here reads. Types
+	// is the largest by far — one entry per expression in the graph.
+	//
+	// Release them before returning, or they stay reachable for as long as the
+	// caller holds the LoadResult.
+	releaseUnreadTypeInfo(pkgs)
+
 	result := &LoadResult{}
 	for _, pkg := range pkgs {
 		for _, e := range pkg.Errors {
@@ -96,4 +106,36 @@ func LoadPackages(ctx context.Context, dir string, opts LoadOpts) (*LoadResult, 
 	}
 
 	return result, nil
+}
+
+// releaseUnreadTypeInfo drops the types.Info maps this repo never reads, across
+// the whole package graph.
+//
+// The kept set is Defs, Uses and Selections — the three the resolver consumes
+// (internal/goanalysis/resolver.go, resolver_dispatch.go). Everything else is
+// a by-product of NeedTypesInfo being a single all-or-nothing Mode flag.
+//
+// It walks with packages.Visit rather than ranging over the roots, because
+// NeedDeps gives every DEPENDENCY its own fully-populated types.Info too. The
+// roots are a small fraction of the retained bytes; a roots-only loop looks
+// like it works and frees almost nothing, which is why
+// TestLoadPackages_ReleasesAcrossDependencyGraph asserts on an imported
+// package rather than on the root.
+//
+// A dropped map reads as empty, not as a panic: indexing a nil Go map returns
+// the zero value. So a future caller that starts reading Types would get a
+// silent "no entry" for every expression rather than a crash — which is why
+// the kept set is pinned by a test instead of left to a comment.
+func releaseUnreadTypeInfo(pkgs []*packages.Package) {
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		if p.TypesInfo == nil {
+			return
+		}
+		p.TypesInfo.Types = nil
+		p.TypesInfo.Implicits = nil
+		p.TypesInfo.Scopes = nil
+		p.TypesInfo.Instances = nil
+		p.TypesInfo.InitOrder = nil
+		p.TypesInfo.FileVersions = nil
+	})
 }
